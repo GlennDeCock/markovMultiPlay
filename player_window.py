@@ -36,14 +36,22 @@ IMG_TOP = IMG_PAD                     # 12  — top of image
 IMG_X   = (PW - IMG_W) // 2          # 142 — horizontally centred
 
 TEXT_Y  = SEP1_Y + 2                  # 326
-BTN_CV_H = 80                         # canvas height for each button widget
+BTN_CV_H = 80                         # kept for restart-button sizing compat
 BTN_PAD = 16
 BTN_GAP = 10
-BTN_W   = (PW - BTN_PAD * 2 - BTN_GAP) // 2   # 366
-BTN_H   = BTN_CV_H + 24              # total button strip height
-SEP2_Y  = PH - BTN_H - 2            # bottom of text zone
-TEXT_H  = SEP2_Y - TEXT_Y            # remaining for text
-BTN_Y   = SEP2_Y + 2 + (BTN_H - BTN_CV_H) // 2  # vertically centred in strip
+BTN_W   = (PW - BTN_PAD * 2 - BTN_GAP) // 2
+BTN_H   = BTN_CV_H + 24
+
+# Choice button zone (replaces fixed 2-button strip)
+CHOICE_BTN_H   = 40                   # height of each choice button canvas
+CHOICE_GAP     = 5                    # gap between buttons
+CHOICE_PAD     = 16                   # horizontal padding
+MAX_CHOICES    = 5                    # pre-built button slots
+_CHOICE_ZONE   = MAX_CHOICES * CHOICE_BTN_H + (MAX_CHOICES - 1) * CHOICE_GAP  # 220
+SEP2_Y         = PH - _CHOICE_ZONE - 8    # bottom of text zone  (~556)
+TEXT_H         = SEP2_Y - TEXT_Y          # text area height     (~230)
+CHOICE_Y_START = SEP2_Y + 6              # first button top y    (~562)
+CHOICE_W       = PW - CHOICE_PAD * 2     # button width          (552)
 
 
 class PlayerWindow:
@@ -98,29 +106,26 @@ class PlayerWindow:
         )
         self.text_box.place(x=0, y=TEXT_Y, width=PW, height=TEXT_H)
 
-        # ── Buttons ───────────────────────────────────────────────────
+        # ── Choice buttons (vertical stack, MAX_CHOICES pre-built slots) ──
         bfont = tkfont.Font(family="Courier", size=10)
-
-        def make_btn(x_pos, cmd):
-            cv = tk.Canvas(paper, width=BTN_W, height=BTN_CV_H,
+        self._choice_buttons: list = []   # list of (canvas, text_item_id)
+        for i in range(MAX_CHOICES):
+            y_pos = CHOICE_Y_START + i * (CHOICE_BTN_H + CHOICE_GAP)
+            cv = tk.Canvas(paper, width=CHOICE_W, height=CHOICE_BTN_H,
                            bg=PAPER, highlightthickness=0, bd=0,
                            cursor="hand2")
-            cv.place(x=x_pos, y=BTN_Y)
-            _dotted_rect(cv, 1, 1, BTN_W - 1, BTN_CV_H - 1)
-            lbl = cv.create_text(
-                BTN_W // 2, BTN_CV_H // 2, text="",
+            cv.place(x=CHOICE_PAD, y=y_pos)
+            _dotted_rect(cv, 1, 1, CHOICE_W - 1, CHOICE_BTN_H - 1)
+            txt_id = cv.create_text(
+                16, CHOICE_BTN_H // 2, text="",
                 fill=INK, font=bfont,
-                width=BTN_W - 20, justify="left", anchor="center",
+                width=CHOICE_W - 24, justify="left", anchor="w",
             )
-            cv.bind("<Button-1>", lambda e: cmd())
+            idx = i
+            cv.bind("<Button-1>", lambda e, i=idx: self._on_choice(i))
             cv.bind("<Enter>",    lambda e, c=cv: c.configure(bg=PAPER_HOV))
             cv.bind("<Leave>",    lambda e, c=cv: c.configure(bg=PAPER))
-            return cv, lbl
-
-        self._bcv0, self._btxt0 = make_btn(BTN_PAD,
-                                            lambda: self._on_choice(0))
-        self._bcv1, self._btxt1 = make_btn(BTN_PAD + BTN_W + BTN_GAP,
-                                            lambda: self._on_choice(1))
+            self._choice_buttons.append((cv, txt_id))
 
         # ── Restart button (hidden by default) ────────────────────────
         self._btn_restart = tk.Button(
@@ -131,12 +136,12 @@ class PlayerWindow:
             command=self._on_restart,
         )
 
-        # ── Node id (bottom-right, very dim) ──────────────────────────
+        # ── Node id (top-right of text zone, very dim) ─────────────────────────────
         self._lbl_node = tk.Label(
             paper, text="", bg=PAPER, fg=INK_DIM,
             font=("Courier", 7), anchor="e",
         )
-        self._lbl_node.place(x=PW - 100, y=PH - 14, width=92)
+        self._lbl_node.place(x=PW - 100, y=SEP1_Y + 2, width=92)
 
         # ── Separator lines — created LAST so they sit on top ─────────
         # Each is a thin Canvas strip placed over the relevant y position.
@@ -161,7 +166,8 @@ class PlayerWindow:
         if state is None:
             return
 
-        node  = self.engine.graph.nodes.get(state.current_node)
+        # Get the correct node regardless of engine mode
+        node  = self.engine.active_graph.nodes.get(state.current_node)
         links = state.current_links
         if state.status == STATUS_COLLISION and state.collision_overlay_text:
             text = state.collision_overlay_text
@@ -173,30 +179,41 @@ class PlayerWindow:
         self._update_image(text)
 
         if state.status == STATUS_GAME_OVER:
-            self._bcv0.place_forget()
-            self._bcv1.place_forget()
+            for cv, _ in self._choice_buttons:
+                cv.place_forget()
             self._btn_restart.place(x=0, y=SEP2_Y + 2,
-                                    width=PW, height=BTN_H)
+                                    width=PW, height=_CHOICE_ZONE + 6)
         else:
             self._btn_restart.place_forget()
-            self._bcv0.place(x=BTN_PAD, y=BTN_Y)
-            self._bcv1.place(x=BTN_PAD + BTN_W + BTN_GAP, y=BTN_Y)
 
+            # Build display list: (prefix, label) per choice
+            choices = links or []
             if state.status == STATUS_COLLISION and state.collision_choice_labels:
-                lbl0 = state.collision_choice_labels[0]
-                lbl1 = (
-                    state.collision_choice_labels[1]
-                    if len(state.collision_choice_labels) > 1
-                    else "—"
-                )
+                col_labels = state.collision_choice_labels
+                display = []
+                for i, lnk in enumerate(choices[:MAX_CHOICES]):
+                    label = col_labels[i] if i < len(col_labels) else lnk.label
+                    display.append(("->  ", label))
             else:
-                lbl0 = links[0].label if links else "—"
-                lbl1 = links[1].label if len(links) > 1 else "—"
-            pfx0 = "↺  " if (links and links[0].is_cross) else "→  "
-            pfx1 = "↺  " if (len(links) > 1 and links[1].is_cross) else "→  "
+                display = []
+                for ch in choices[:MAX_CHOICES]:
+                    ctype = getattr(ch, "choice_type", "exit")
+                    if ctype == "interact":
+                        pfx = "o  "
+                    elif getattr(ch, "is_cross", False):
+                        pfx = "~  "
+                    else:
+                        pfx = "->  "
+                    display.append((pfx, ch.label))
 
-            self._bcv0.itemconfigure(self._btxt0, text=pfx0 + lbl0)
-            self._bcv1.itemconfigure(self._btxt1, text=pfx1 + lbl1)
+            for i, (cv, txt_id) in enumerate(self._choice_buttons):
+                y_pos = CHOICE_Y_START + i * (CHOICE_BTN_H + CHOICE_GAP)
+                if i < len(display):
+                    pfx, label = display[i]
+                    cv.place(x=CHOICE_PAD, y=y_pos)
+                    cv.itemconfigure(txt_id, text=pfx + label)
+                else:
+                    cv.place_forget()
 
     def _set_text(self, text: str):
         self.text_box.configure(state="normal")

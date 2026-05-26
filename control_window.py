@@ -54,6 +54,10 @@ class ControlWindow:
         self.engine = StoryEngine(training_dir=base / "training_texts")
         self.engine.on_graph_change = self._on_graph_change
 
+        world_file = base / "data" / "world" / "example_world.json"
+        if world_file.exists():
+            self.engine.load_world(world_file)
+
         self.player_windows: dict[str, PlayerWindow] = {}
         self.next_num = 1
 

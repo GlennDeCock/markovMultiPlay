@@ -104,14 +104,14 @@ class GraphCanvas:
     # ------------------------------------------------------------------
 
     def _sync_new_nodes(self):
-        for node_id in self.engine.graph.nodes:
+        for node_id in self.engine.active_graph.nodes:
             if node_id not in self._pos:
                 cx, cy = self._initial_pos(node_id)
                 self._pos[node_id] = [cx, cy]
 
     def _initial_pos(self, node_id: str) -> tuple:
         """Place new node near a linked neighbour, or at centre with jitter."""
-        graph = self.engine.graph
+        graph = self.engine.active_graph
         for link in graph.links.values():
             if link.to_node == node_id and link.from_node in self._pos:
                 nx, ny = self._pos[link.from_node]
@@ -134,7 +134,7 @@ class GraphCanvas:
             return
         self.canvas.delete("all")
 
-        graph = self.engine.graph
+        graph = self.engine.active_graph
 
         # Index players by node
         players_at: dict[str, list] = {}
@@ -274,7 +274,7 @@ class GraphCanvas:
 
     def _show_tip(self, x: int, y: int, node_id: str):
         self._hide_tip()
-        node  = self.engine.graph.nodes.get(node_id)
+        node  = self.engine.active_graph.nodes.get(node_id)
         if not node:
             return
         at   = [pid for pid, s in self.engine.players.items() if s.current_node == node_id]

@@ -10,6 +10,7 @@ The story graph GROWS as players make choices.
   path-seeded overlay text). When only one player remains, collision clears.
 """
 
+import json
 import random
 import re
 from collections import defaultdict
@@ -331,11 +332,107 @@ class PlayerState:
         self.current_node = start_node
         self.status       = STATUS_ACTIVE
         self.history: list[str] = [start_node]
-        # The two link choices currently presented to this player
-        self.current_links: list[Link] = []
+        # The choices currently presented to this player (exits or interactions)
+        self.current_links: list = []
         # Per-player collision scene (does not overwrite shared node text)
         self.collision_overlay_text: str | None = None
         self.collision_choice_labels: list[str] | None = None
+        # World mode: track which interactions have been taken at each node
+        self.taken_interactions: dict = {}  # node_id → set of choice labels
+
+
+# ---------------------------------------------------------------------------
+# World graph data structures  (static authored world)
+# ---------------------------------------------------------------------------
+
+class ExitLink:
+    """Pre-authored exit from a WorldNode to another WorldNode."""
+
+    def __init__(self, from_node: str, to_node: str, label: str):
+        self.id          = f"exit_{from_node}__{to_node}"
+        self.from_node   = from_node
+        self.to_node     = to_node
+        self.label       = label
+        self.is_cross    = False
+        self.choice_type = "exit"
+
+
+class InteractionChoice:
+    """Generated in-node interaction — player stays at current node."""
+
+    def __init__(self, label: str):
+        self.label       = label
+        self.is_cross    = False
+        self.choice_type = "interact"
+        self.to_node     = None
+        self.id          = f"interact__{label[:12].replace(' ', '_')}"
+
+
+class WorldNode:
+    """A static authored node in the world graph."""
+
+    def __init__(self, node_id: str, title: str, description: str,
+                 exits: list, tags: list):
+        self.id                  = node_id
+        self.title               = title
+        self.base_text           = description
+        self.text                = description   # updated when changes accumulate
+        self.exits               = exits          # list[ExitLink]
+        self.tags                = tags           # list[str] for seeding generation
+        self.accumulated_changes: list[str] = []
+        self.visitors: set       = set()
+        self.interaction_count   = 0
+        # Duck-type compat with Node for GraphCanvas
+        self.is_mutated          = False
+        self.expanded            = True           # world nodes are always "expanded"
+
+    @property
+    def mutations(self) -> list:
+        return self.accumulated_changes
+
+    def _update_text(self):
+        if self.accumulated_changes:
+            self.text       = (self.base_text + "\n\n\u2014 \u2014 \u2014\n\n"
+                               + "\n\n".join(self.accumulated_changes))
+            self.is_mutated = True
+        else:
+            self.text       = self.base_text
+            self.is_mutated = False
+
+
+class WorldGraph:
+    """Loads and holds the static authored world graph."""
+
+    def __init__(self):
+        self.nodes: dict[str, WorldNode] = {}
+        self.start_node = ""
+
+    @property
+    def links(self) -> dict:
+        """Duck-type compatible with DynamicGraph.links for GraphCanvas."""
+        result = {}
+        for node in self.nodes.values():
+            for ex in node.exits:
+                result[ex.id] = ex
+        return result
+
+    def load(self, path) -> "WorldGraph":
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        self.start_node = data.get("start", "")
+        for nd in data.get("nodes", []):
+            exits = [
+                ExitLink(from_node=nd["id"], to_node=e["to"], label=e["label"])
+                for e in nd.get("exits", [])
+            ]
+            node = WorldNode(
+                node_id     = nd["id"],
+                title       = nd.get("title", nd["id"]),
+                description = nd["description"],
+                exits       = exits,
+                tags        = nd.get("tags", []),
+            )
+            self.nodes[node.id] = node
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +450,11 @@ class StoryEngine:
         self.players: dict[str, PlayerState] = {}
         # node_id → set of player_ids currently at that node
         self._at_node: dict[str, set] = defaultdict(set)
+
+        # World mode (static authored graph) — None means dynamic mode
+        self.world: WorldGraph | None       = None
+        self._world_at_node: dict[str, set] = defaultdict(set)
+        self.max_interactions_per_node      = 3
 
         # Callbacks — UI registers these to be notified of graph changes
         self.on_graph_change = None   # callable()
@@ -383,6 +485,176 @@ class StoryEngine:
         This keeps the world consistent: new locations echo the vocabulary
         of places already discovered."""
         self.markov.train(text)
+
+    # ------------------------------------------------------------------
+    # World mode — static authored graph
+    # ------------------------------------------------------------------
+
+    @property
+    def _is_world_mode(self) -> bool:
+        return self.world is not None
+
+    @property
+    def active_graph(self):
+        """The graph used for rendering — world or dynamic."""
+        return self.world if self._is_world_mode else self.graph
+
+    def load_world(self, path) -> "StoryEngine":
+        """Load a static authored world from a JSON file."""
+        self.world = WorldGraph().load(Path(path))
+        self._world_at_node = defaultdict(set)
+        if self.on_graph_change:
+            self.on_graph_change()
+        return self
+
+    def _world_spawn_player(self, player_id: str) -> "PlayerState":
+        start_id = self.world.start_node
+        if start_id not in self.world.nodes:
+            start_id = next(iter(self.world.nodes))
+        self.world.nodes[start_id].visitors.add(player_id)
+        state = PlayerState(player_id, start_id)
+        self.players[player_id] = state
+        self._world_at_node[start_id].add(player_id)
+        others_here = self._world_at_node[start_id] - {player_id}
+        if others_here:
+            self._apply_world_collision_at_node(start_id, player_id, others_here)
+        else:
+            self._refresh_choices_for_world_player(player_id)
+        if self.on_graph_change:
+            self.on_graph_change()
+        return state
+
+    def _world_reset_player(self, player_id: str) -> "PlayerState":
+        if player_id in self.players:
+            old = self.players[player_id].current_node
+            self._world_at_node[old].discard(player_id)
+            del self.players[player_id]
+        return self._world_spawn_player(player_id)
+
+    def _refresh_choices_for_world_player(self, player_id: str):
+        """Populate state.current_links with authored exits + generated interactions."""
+        state = self.players[player_id]
+        node  = self.world.nodes[state.current_node]
+        choices = list(node.exits)
+        if node.interaction_count < self.max_interactions_per_node:
+            choices.extend(self.generate_interaction_choices(state.current_node))
+        state.current_links = choices
+
+    def generate_interaction_choices(self, node_id: str) -> list:
+        """Generate 2 interaction choices seeded from node text and tags."""
+        node = self.world.nodes[node_id]
+        choices = []
+        used = ""
+        for _ in range(2):
+            label = self._gen_label_from_node(node.text, exclude_phrase=used)
+            if node.tags:
+                seeded = self._markov_seeded_generate(
+                    node.tags[:3] + label.split(), length=self.choice_len
+                )
+                words = seeded.split()[:self.choice_len]
+                if words:
+                    words[-1] = words[-1].rstrip(".!?,;:")
+                seeded_label = " ".join(words)
+                if seeded_label:
+                    seeded_label = seeded_label[0].upper() + seeded_label[1:]
+                label = seeded_label or label
+            used = label
+            choices.append(InteractionChoice(label=label))
+        return choices
+
+    def apply_interaction(self, player_id: str, choice: "InteractionChoice") -> "PlayerState":
+        """Player acts on something in the current node — generates and appends reaction text."""
+        state = self.players[player_id]
+        node  = self.world.nodes[state.current_node]
+        seed_words = node.tags + choice.label.split()
+        reaction   = self._markov_seeded_generate(
+            seed_words, length=max(10, self.text_len // 2)
+        )
+        if reaction:
+            reaction = reaction[0].upper() + reaction[1:]
+            node.accumulated_changes.append(reaction)
+        node.interaction_count += 1
+        node._update_text()
+        node_id = state.current_node
+        if node_id not in state.taken_interactions:
+            state.taken_interactions[node_id] = set()
+        state.taken_interactions[node_id].add(choice.label)
+        self._refresh_choices_for_world_player(player_id)
+        if self.on_graph_change:
+            self.on_graph_change()
+        return state
+
+    def _world_make_choice(self, player_id: str, choice_index: int) -> "PlayerState":
+        state   = self.players[player_id]
+        choices = state.current_links
+        if not choices or choice_index >= len(choices):
+            return state
+        chosen = choices[choice_index]
+        if chosen.choice_type == "interact":
+            return self.apply_interaction(player_id, chosen)
+        # Navigation (exit choice)
+        target_id = chosen.to_node
+        from_id   = state.current_node
+        if target_id not in self.world.nodes:
+            return state
+        self._world_at_node[from_id].discard(player_id)
+        self._sync_world_collision_at_node(from_id)
+        target_node = self.world.nodes[target_id]
+        target_node.visitors.add(player_id)
+        others_here  = self._world_at_node[target_id] - {player_id}
+        is_collision = bool(others_here)
+        self._world_at_node[target_id].add(player_id)
+        state.current_node = target_id
+        state.history.append(target_id)
+        if is_collision:
+            self._apply_world_collision_at_node(target_id, player_id, others_here)
+        else:
+            self._clear_collision_display(state)
+            state.status = STATUS_ACTIVE
+            self._refresh_choices_for_world_player(player_id)
+        if self.on_graph_change:
+            self.on_graph_change()
+        return state
+
+    def _sync_world_collision_at_node(self, node_id: str):
+        occupants = self._world_at_node.get(node_id, set())
+        if len(occupants) > 1:
+            return
+        for pid in list(occupants):
+            state = self.players.get(pid)
+            if state is None or state.status != STATUS_COLLISION:
+                continue
+            self._clear_collision_display(state)
+            state.status = STATUS_ACTIVE
+            self._refresh_choices_for_world_player(pid)
+
+    def _apply_world_collision_at_node(self, node_id: str, arriving_player_id: str,
+                                       others_here: set):
+        target_node = self.world.nodes[node_id]
+        all_here    = others_here | {arriving_player_id}
+        for pid in all_here:
+            state   = self.players[pid]
+            overlay = self._gen_world_collision_text(target_node, pid)
+            state.status = STATUS_COLLISION
+            state.collision_overlay_text = overlay
+            state.current_links = list(target_node.exits)
+            n_labels = min(2, len(target_node.exits))
+            if n_labels:
+                state.collision_choice_labels = self._collision_display_labels(
+                    overlay, n=n_labels
+                )
+
+    def _gen_world_collision_text(self, node: "WorldNode", player_id: str) -> str:
+        state      = self.players[player_id]
+        seed_words = node.base_text.split()[-6:] + node.tags
+        for nid in state.history[-3:]:
+            hist = self.world.nodes.get(nid)
+            if hist:
+                seed_words.extend(hist.base_text.split()[-4:])
+        seed_words.extend(
+            random.sample(self._ENCOUNTER_WORDS, min(3, len(self._ENCOUNTER_WORDS)))
+        )
+        return self._markov_seeded_generate(seed_words, length=self.text_len)
 
     # ------------------------------------------------------------------
     # Text generation
@@ -650,6 +922,8 @@ class StoryEngine:
         return node.id
 
     def spawn_player(self, player_id: str) -> PlayerState:
+        if self._is_world_mode:
+            return self._world_spawn_player(player_id)
         node_id = self._make_player_start(player_id)
         state = PlayerState(player_id, node_id)
         self.players[player_id] = state
@@ -660,6 +934,8 @@ class StoryEngine:
         return state
 
     def reset_player(self, player_id: str) -> PlayerState:
+        if self._is_world_mode:
+            return self._world_reset_player(player_id)
         if player_id in self.players:
             old = self.players[player_id].current_node
             self._at_node[old].discard(player_id)
@@ -793,7 +1069,9 @@ class StoryEngine:
     # ------------------------------------------------------------------
 
     def make_choice(self, player_id: str, link_index: int) -> PlayerState:
-        """Player selects link 0 or 1. Returns updated PlayerState."""
+        """Player selects a choice by index. Returns updated PlayerState."""
+        if self._is_world_mode:
+            return self._world_make_choice(player_id, link_index)
         state = self.players[player_id]
 
         if state.status == STATUS_GAME_OVER:
@@ -878,7 +1156,18 @@ class StoryEngine:
         return list(self.players.values())
 
     def reset_graph(self):
-        """Full reset — clear graph and all players."""
+        """Full reset — clear graph/world state and all players."""
+        if self._is_world_mode:
+            for node in self.world.nodes.values():
+                node.accumulated_changes = []
+                node.visitors = set()
+                node.interaction_count = 0
+                node._update_text()
+            self.players = {}
+            self._world_at_node = defaultdict(set)
+            if self.on_graph_change:
+                self.on_graph_change()
+            return
         self.graph = DynamicGraph()
         self.players = {}
         self._at_node = defaultdict(set)
