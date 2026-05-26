@@ -1,0 +1,18 @@
+Thinking: The user wants to plan improvements to make the encounters and story more meaningful, and wants a literature theory example. Let me think about this carefully.
+The core request:
+1. Encounters should reflect in the story text and button options more
+2. The buttons/choices should feel more related to the current story content
+3. A literature theory example of this kind of collaborative mapping/discovery
+Let me think about the literature theory angle first, then plan the technical improvements.
+Literature theory example:
+This reminds me of several things:
+- Ergodic literature (Espen Aarseth) - literature that requires non-trivial traversal effort
+- Hypertext fiction like Michael Joyce's "afternoon, a story" or Shelley Jackson's "Patchwork Girl" where the reader's choices shape the narrative path
+- The Situationist dérive - the idea of drifting through a space and letting it influence you, which mirrors how encounters should organically shape the story
+- Nouveau Roman and its focus on objective descriptions of spaces and objects rather than internal psychology
+- Oulipo works like Perec's "Life: A User's Manual" or Calvino's "If on a winter's night a traveler" that play with structure and reader agency
+- Essentially a more literary take on Choose Your Own Adventure, where encounters act like a collaborative exquisite corpse - each discovery builds on what came before
+The theoretical framework that ties this together is ergodic literature - where the reader has to do real work to navigate the text - combined with intersubjective narrative, where the story emerges between different players' experiences rather than existing in any single one. Perec's systematic exhaustion of a place and Debord's psychogeography both capture how the encounter mechanic should work: two readers who've experienced different parts of the same world meeting and their stories bleeding into each other.
+The core issue right now is that the text generation is pure Markov chains with no contextual awareness, so encounters just regenerate random fragments instead of creating meaningful narrative coherence.
+To fix this, I'd seed the text generation with words and themes from the player's recent node history, so the city continues evolving from where they've been. When encounters happen, I'd flip the training corpus from "no one" and "nothing" to acknowledge another presence. The button labels should extract key phrases directly from the generated text instead of being random, and nodes themselves could be named from their distinctive opening words to make the graph more navigable. The encounter corpus blends in vocabulary about shadows and footsteps when collisions occur. For the graph display, I'll extract 2-word names from each node's text instead of generic identifiers. Weighing the options, button labels derived from node text, encounter corpus integration, and context seeding through parent words offer the best balance of impact and feasibility. I'm thinking about grounding this in literary theory—Aarseth's concept of ergodic literature and textons seems relevant here, along with Perec's work.
+Now I'm connecting this to psychogeography and constrained writing: the dérive combined with Oulipo constraints mirrors what's happening with the Markov generation and spatial drift through the city. Borges' "The Garden of Forking Paths" is the perfect parallel—players traversing different narrative paths through the same labyrinthine structure. This framework ties everything together conceptually.

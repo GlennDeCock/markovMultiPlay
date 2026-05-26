@@ -1,0 +1,72 @@
+The keys are no longer on their hooks.
+The hooks are bare, the wall behind them lighter where the keys once hung.
+A chair has been moved to face the window.
+The window was closed before.
+The window is open now, curtain pulling out toward the street.
+The cup on the counter has been emptied.
+There is a ring of moisture where the cup stood.
+The drawer is not fully closed.
+Something was taken from the drawer.
+The lights are off now.
+The overhead light has been switched off, the room reading in grey.
+One bulb remains, the others extinguished.
+The door at the far end stands open.
+The door was not open before.
+The latch is turned but the door swings free.
+A coat is missing from the rack.
+The rack holds fewer things now.
+One hanger turns slowly on its own.
+The map on the wall has been touched.
+A corner of the map is folded back.
+Someone marked something on the map and then left.
+The register is open, the drawer out.
+Nothing was taken, but everything was looked at.
+The papers have been sorted into a different order.
+A window latch is broken now, swinging loosely.
+There are no keys on the desk.
+The desk lamp points at nothing.
+The chair is warm.
+The notepad has one word on it, unfinished.
+The floor shows the path someone walked, dust moved in a line.
+A light in the stairwell has been turned on.
+The stairwell was dark before.
+The elevator has been called and not returned.
+The elevator doors stand open on an empty floor.
+The shelf has a gap in it.
+Something stood between those two books and does not stand there now.
+The second-floor light blinks once and does not blink again.
+The blind on the north window is halfway up.
+It was fully down when the city was still.
+A vent is running somewhere in the wall.
+The vent was not running before.
+The thermostat has been changed.
+The door to the roof is unlocked.
+It was locked.
+A single footprint in the dust near the service entrance.
+The service door swings on one hinge.
+The vending machine has dispensed something.
+The vending machine slot is empty.
+A bicycle is unchained where before it was chained.
+The bicycle leans against a different wall now.
+The fire door on the second floor is propped open with a brick.
+The brick was not there before.
+The fire door was never propped open before.
+The office chair has rolled from behind the desk.
+It rests against the window, facing out.
+The filing cabinet's top drawer is open.
+The files inside are in the wrong order.
+A pen lies on the floor near the cabinet.
+The blinds in room seven have been turned to let in light.
+Room seven was dark.
+The safe door is ajar, nothing missing, nothing added.
+The safe door was sealed before.
+A single fluorescent tube flickers on.
+It was dark in that corridor.
+The elevator has gone to the sixth floor and stayed.
+A fire extinguisher has been moved three feet to the left.
+The shadow it casts is new.
+The clock on the wall has stopped.
+It was running before, the second hand moving.
+Now it does not move.
+A radio somewhere plays one note and stops.
+The note hangs in the air a moment, then the air is as it was.
