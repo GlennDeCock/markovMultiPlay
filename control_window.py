@@ -11,6 +11,7 @@ from pathlib import Path
 from engine import StoryEngine, STATUS_ACTIVE, STATUS_COLLISION, STATUS_GAME_OVER
 from player_window import PlayerWindow
 from graph_canvas import GraphCanvas
+from world_text_parser import convert_file as _parse_world_txt
 
 # Palette
 BG    = "#0d0d1a"
@@ -54,15 +55,18 @@ class ControlWindow:
         self.engine = StoryEngine(training_dir=base / "training_texts")
         self.engine.on_graph_change = self._on_graph_change
 
-        world_file = base / "data" / "world" / "example_world.json"
-        if world_file.exists():
-            self.engine.load_world(world_file)
+        # Paths for world file and its source text
+        self._world_json = base / "data" / "world" / "example_world.json"
+        self._world_txt  = base / "data" / "worlds" / "example_world.txt"
 
         self.player_windows: dict[str, PlayerWindow] = {}
         self.next_num = 1
 
         self._build_ui()
         self._refresh_player_list()
+
+        if self._world_json.exists():
+            self.engine.load_world(self._world_json)
 
     # ------------------------------------------------------------------
     # UI construction
@@ -160,6 +164,8 @@ class ControlWindow:
         _btn(retrain_row, "Retrain", self._retrain).pack(side="left")
         _btn(retrain_row, "Reset Graph", self._reset_graph,
              bg="#2a1a0d", fg="#ffaa44").pack(side="left", padx=6)
+        _btn(retrain_row, "Rebuild World", self._rebuild_world,
+             bg="#0d1a2a", fg="#44aaff").pack(side="left", padx=6)
         self.lbl_train = tk.Label(retrain_row, text="", bg=BG2, fg=ACC3,
                                    font=("Courier", 8))
         self.lbl_train.pack(side="left", padx=6)
@@ -295,6 +301,29 @@ class ControlWindow:
         n = self.engine.retrain(order)
         self.lbl_train.configure(text=f"trained {n} file(s)")
         self.root.after(3000, lambda: self.lbl_train.configure(text=""))
+
+    def _rebuild_world(self):
+        """Re-parse the source .txt, regenerate the JSON, and reload the world."""
+        if not self._world_txt.exists():
+            messagebox.showerror(
+                "Rebuild World",
+                f"Source text not found:\n{self._world_txt}",
+            )
+            return
+        try:
+            _parse_world_txt(self._world_txt, self._world_json)
+            self.engine.reset_graph()
+            self.engine.load_world(self._world_json)
+            for pw in self.player_windows.values():
+                self.engine.spawn_player(pw.player_id)
+                pw._refresh_from_state()
+            self._refresh_player_list()
+            self.graph_cv.refresh(animate=True)
+            n = len(self.engine.world.nodes)
+            self.lbl_train.configure(text=f"world rebuilt  {n} nodes")
+            self.root.after(3000, lambda: self.lbl_train.configure(text=""))
+        except Exception as exc:
+            messagebox.showerror("Rebuild World", str(exc))
 
     def _on_textlen(self, val):
         self.engine.set_text_len(int(float(val)))

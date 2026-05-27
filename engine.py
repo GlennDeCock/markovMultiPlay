@@ -382,6 +382,7 @@ class WorldNode:
         self.accumulated_changes: list[str] = []
         self.visitors: set       = set()
         self.interaction_count   = 0
+        self.pregenerated_choices: list = []      # populated once at world load time
         # Duck-type compat with Node for GraphCanvas
         self.is_mutated          = False
         self.expanded            = True           # world nodes are always "expanded"
@@ -432,6 +433,15 @@ class WorldGraph:
                 tags        = nd.get("tags", []),
             )
             self.nodes[node.id] = node
+        return self
+
+    def pregenerate(self, engine) -> "WorldGraph":
+        """Pre-generate all interaction choices for every node using Markov.
+        Called once after world load so choices are static throughout the session."""
+        for node_id in self.nodes:
+            self.nodes[node_id].pregenerated_choices = (
+                engine.generate_interaction_choices(node_id)
+            )
         return self
 
 
@@ -500,9 +510,11 @@ class StoryEngine:
         return self.world if self._is_world_mode else self.graph
 
     def load_world(self, path) -> "StoryEngine":
-        """Load a static authored world from a JSON file."""
+        """Load a static authored world from a JSON file and pre-generate choices."""
         self.world = WorldGraph().load(Path(path))
         self._world_at_node = defaultdict(set)
+        if self.markov.chain:          # only pregenerate if training data is loaded
+            self.world.pregenerate(self)
         if self.on_graph_change:
             self.on_graph_change()
         return self
@@ -532,12 +544,16 @@ class StoryEngine:
         return self._world_spawn_player(player_id)
 
     def _refresh_choices_for_world_player(self, player_id: str):
-        """Populate state.current_links with authored exits + generated interactions."""
+        """Populate state.current_links with authored exits + interaction choices.
+        Uses pre-generated choices when available; falls back to live generation."""
         state = self.players[player_id]
         node  = self.world.nodes[state.current_node]
         choices = list(node.exits)
         if node.interaction_count < self.max_interactions_per_node:
-            choices.extend(self.generate_interaction_choices(state.current_node))
+            if node.pregenerated_choices:
+                choices.extend(node.pregenerated_choices)
+            else:
+                choices.extend(self.generate_interaction_choices(state.current_node))
         state.current_links = choices
 
     def generate_interaction_choices(self, node_id: str) -> list:
