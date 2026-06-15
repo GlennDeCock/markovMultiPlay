@@ -1,0 +1,65 @@
+{
+  "start_nodes": ["plaza_fountain", "station_concourse", "back_alley"],
+  "nodes": [
+    {
+      "id": "plaza_fountain",
+      "title": "The Dry Fountain",
+      "text": "The fountain is dry. Someone left a coat on the bench nearby. The water stains on the basin are old. Nothing moves here.",
+      "exits": [
+        { "label": "the maintenance tunnel", "to": "maintenance_tunnel" },
+        { "label": "the coat on the bench", "to": "side_street" }
+      ],
+      "tags": ["fountain", "bench", "coat", "dry", "plaza"]
+    },
+    {
+      "id": "station_concourse",
+      "title": "The Station Concourse",
+      "text": "The departure board shows no departures. A few chairs remain bolted to the floor. The light through the high windows is flat and grey.",
+      "exits": [
+        { "label": "the departure board", "to": "platform_end" },
+        { "label": "the bolted chairs", "to": "side_street" }
+      ],
+      "tags": ["station", "chairs", "window", "board", "grey"]
+    },
+    {
+      "id": "back_alley",
+      "title": "The Back Alley",
+      "text": "A pipe drips somewhere. The walls are close. A sign has been turned to face the brick. You cannot read what it says.",
+      "exits": [
+        { "label": "the dripping pipe", "to": "maintenance_tunnel" },
+        { "label": "the turned sign", "to": "plaza_fountain" }
+      ],
+      "tags": ["alley", "pipe", "sign", "brick", "narrow"]
+    },
+    {
+      "id": "maintenance_tunnel",
+      "title": "The Maintenance Tunnel",
+      "text": "The ceiling is low. A row of numbered doors, most with no handles. The floor slopes gently in one direction. It is very quiet.",
+      "exits": [
+        { "label": "the numbered doors", "to": "room_with_a_clock" },
+        { "label": "the sloping floor", "to": "plaza_fountain" }
+      ],
+      "tags": ["tunnel", "doors", "ceiling", "quiet", "slope"]
+    },
+    {
+      "id": "side_street",
+      "title": "The Side Street",
+      "text": "A bicycle leans against the wall. It has been here long enough that the wall has left a mark on it. At the far end a lamp is on, though it is not dark.",
+      "exits": [
+        { "label": "the leaning bicycle", "to": "back_alley" },
+        { "label": "the lamp at the end", "to": "station_concourse" }
+      ],
+      "tags": ["bicycle", "wall", "lamp", "street", "mark"]
+    },
+    {
+      "id": "room_with_a_clock",
+      "title": "The Room With A Clock",
+      "text": "The clock on the wall shows a time you do not recognise. The table has one chair. The window is painted over from the inside. Someone has been careful here.",
+      "exits": [
+        { "label": "the clock on the wall", "to": "maintenance_tunnel" },
+        { "label": "the painted window", "to": "plaza_fountain" }
+      ],
+      "tags": ["clock", "table", "chair", "window", "painted"]
+    }
+  ]
+}

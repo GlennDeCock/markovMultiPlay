@@ -1,0 +1,626 @@
+{
+  "start_nodes": [
+    "western_plant_room",
+    "apartment_tower_lobby",
+    "apartment_tower_stairwell",
+    "motorway_overpass",
+    "loading_bay",
+    "pedestrian_bridge",
+    "car_park",
+    "transit_hall",
+    "far_end",
+    "maintenance_tunnel",
+    "railway_platform",
+    "south_bank",
+    "apartment_tower",
+    "concrete_wall",
+    "arcade",
+    "roof",
+    "district",
+    "effigy",
+    "centre",
+    "plaza",
+    "entrance",
+    "walls",
+    "floor"
+  ],
+  "nodes": [
+    {
+      "id": "western_plant_room",
+      "title": "Western Plant Room",
+      "text": "The western plant room contains a boiler that is no longer running, the pilot light out.\n\nThe western plant room leads to the loading bay.\n\nThe western plant room without passing through any public space.",
+      "description": "The western plant room contains a boiler that is no longer running, the pilot light out.\n\nThe western plant room leads to the loading bay.\n\nThe western plant room without passing through any public space.",
+      "tags": [
+        "western",
+        "plant",
+        "room",
+        "contains",
+        "boiler",
+        "longer"
+      ],
+      "exits": [
+        {
+          "to": "apartment_tower_lobby",
+          "label": "Descend the apartment"
+        },
+        {
+          "to": "floor",
+          "label": "Follow the floor"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "apartment_tower_lobby",
+      "title": "Apartment Tower Lobby",
+      "text": "The office lobby floor is polished concrete, still clean except for a single set of footprints in fine grey dust leading from the.\n\nThe office lobby floor is carpeted, the carpet worn in a path from the door to the lift.\n\nThe apartment tower lobby opens onto the pedestrian bridge are intact except for one at the midpoint, which has been replaced with plywood.",
+      "description": "The office lobby floor is polished concrete, still clean except for a single set of footprints in fine grey dust leading from the.\n\nThe office lobby floor is carpeted, the carpet worn in a path from the door to the lift.\n\nThe apartment tower lobby opens onto the pedestrian bridge are intact except for one at the midpoint, which has been replaced with plywood.",
+      "tags": [
+        "apartment",
+        "tower",
+        "lobby",
+        "office",
+        "floor",
+        "polished"
+      ],
+      "exits": [
+        {
+          "to": "western_plant_room",
+          "label": "Cross the western"
+        },
+        {
+          "to": "apartment_tower_stairwell",
+          "label": "Return the apartment"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "apartment_tower_stairwell",
+      "title": "Apartment Tower Stairwell",
+      "text": "The stairwell climbs the eastern tower from the ground floor to the roof.\n\nThe apartment tower lobby opens onto the pedestrian bridge at first floor level.\n\nThe stairwell climbs the eastern tower is accessible from the stairwell.",
+      "description": "The stairwell climbs the eastern tower from the ground floor to the roof.\n\nThe apartment tower lobby opens onto the pedestrian bridge at first floor level.\n\nThe stairwell climbs the eastern tower is accessible from the stairwell.",
+      "tags": [
+        "apartment",
+        "tower",
+        "stairwell",
+        "climbs",
+        "eastern",
+        "ground"
+      ],
+      "exits": [
+        {
+          "to": "apartment_tower_lobby",
+          "label": "Climb the apartment"
+        },
+        {
+          "to": "motorway_overpass",
+          "label": "Enter the motorway"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "motorway_overpass",
+      "title": "Motorway Overpass",
+      "text": "The motorway overpass carries six lanes above the district.\n\nThe motorway overpass is supported by concrete columns set at regular intervals through the district below.\n\nThe motorway overpass is constant and directional.",
+      "description": "The motorway overpass carries six lanes above the district.\n\nThe motorway overpass is supported by concrete columns set at regular intervals through the district below.\n\nThe motorway overpass is constant and directional.",
+      "tags": [
+        "motorway",
+        "overpass",
+        "carries",
+        "six",
+        "lanes",
+        "above"
+      ],
+      "exits": [
+        {
+          "to": "apartment_tower_stairwell",
+          "label": "Return the apartment"
+        },
+        {
+          "to": "loading_bay",
+          "label": "Return the loading"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "loading_bay",
+      "title": "Loading Bay",
+      "text": "The loading bay faces the service road from the live lanes.\n\nThe loading bay is sheltered by a canopy above the dock doors.\n\nThe loading bay faces the service road at the rear of the retail block.",
+      "description": "The loading bay faces the service road from the live lanes.\n\nThe loading bay is sheltered by a canopy above the dock doors.\n\nThe loading bay faces the service road at the rear of the retail block.",
+      "tags": [
+        "loading",
+        "bay",
+        "faces",
+        "service",
+        "road",
+        "live"
+      ],
+      "exits": [
+        {
+          "to": "motorway_overpass",
+          "label": "Push the motorway"
+        },
+        {
+          "to": "pedestrian_bridge",
+          "label": "Climb the pedestrian"
+        }
+      ],
+      "items": [
+        "fountain"
+      ]
+    },
+    {
+      "id": "pedestrian_bridge",
+      "title": "Pedestrian Bridge",
+      "text": "The pedestrian bridge affords a view of the canal and the motorway overpass is low enough to touch from the top of the.\n\nThe pedestrian bridge is steel and glass, enclosed.\n\nThe pedestrian bridge crosses the canal between the retail block and the apartment towers.",
+      "description": "The pedestrian bridge affords a view of the canal and the motorway overpass is low enough to touch from the top of the.\n\nThe pedestrian bridge is steel and glass, enclosed.\n\nThe pedestrian bridge crosses the canal between the retail block and the apartment towers.",
+      "tags": [
+        "pedestrian",
+        "bridge",
+        "affords",
+        "view",
+        "canal",
+        "motorway"
+      ],
+      "exits": [
+        {
+          "to": "loading_bay",
+          "label": "Step the loading"
+        },
+        {
+          "to": "car_park",
+          "label": "Enter the car"
+        }
+      ],
+      "items": [
+        "pallet"
+      ]
+    },
+    {
+      "id": "car_park",
+      "title": "Car Park",
+      "text": "The car park lighting runs on a motion sensor that activates when anything moves through the car park.\n\nThe car park occupies the basement and the first two levels below the plaza.\n\nThe car park smells of oil and concrete dust.",
+      "description": "The car park lighting runs on a motion sensor that activates when anything moves through the car park.\n\nThe car park occupies the basement and the first two levels below the plaza.\n\nThe car park smells of oil and concrete dust.",
+      "tags": [
+        "car",
+        "park",
+        "lighting",
+        "runs",
+        "motion",
+        "sensor"
+      ],
+      "exits": [
+        {
+          "to": "pedestrian_bridge",
+          "label": "Push the pedestrian"
+        },
+        {
+          "to": "transit_hall",
+          "label": "Climb the transit"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "transit_hall",
+      "title": "Transit Hall",
+      "text": "The transit hall connects the railway platform near the mouth of the tunnel: thin wire bound with electrical tape, taller than a person.\n\nThe transit hall ceiling is high, the walls tiled in a pattern that is not random.\n\nThe transit hall ceiling is high, the walls tiled in a pattern of overlapping rectangles.",
+      "description": "The transit hall connects the railway platform near the mouth of the tunnel: thin wire bound with electrical tape, taller than a person.\n\nThe transit hall ceiling is high, the walls tiled in a pattern that is not random.\n\nThe transit hall ceiling is high, the walls tiled in a pattern of overlapping rectangles.",
+      "tags": [
+        "transit",
+        "hall",
+        "connects",
+        "railway",
+        "platform",
+        "mouth"
+      ],
+      "exits": [
+        {
+          "to": "car_park",
+          "label": "Cross the car"
+        },
+        {
+          "to": "far_end",
+          "label": "Push the far"
+        }
+      ],
+      "items": [
+        "effigies"
+      ]
+    },
+    {
+      "id": "far_end",
+      "title": "Far End",
+      "text": "The central plaza opens between four office towers.\n\nThe canal towpath is tarmac, cracked, with bollards at intervals.\n\nThe maintenance tunnel runs beneath the arcade and the plaza.",
+      "description": "The central plaza opens between four office towers.\n\nThe canal towpath is tarmac, cracked, with bollards at intervals.\n\nThe maintenance tunnel runs beneath the arcade and the plaza.",
+      "tags": [
+        "far",
+        "end",
+        "central",
+        "plaza",
+        "opens",
+        "four"
+      ],
+      "exits": [
+        {
+          "to": "transit_hall",
+          "label": "Descend the transit"
+        },
+        {
+          "to": "maintenance_tunnel",
+          "label": "Step the maintenance"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "maintenance_tunnel",
+      "title": "Maintenance Tunnel",
+      "text": "The service tunnel runs parallel to the main service road at the rear of the retail block.\n\nThe maintenance tunnel is low, the ceiling crossed with pipes and cable trays.\n\nThe service tunnel floor is concrete with a shallow drainage channel running down the centre.",
+      "description": "The service tunnel runs parallel to the main service road at the rear of the retail block.\n\nThe maintenance tunnel is low, the ceiling crossed with pipes and cable trays.\n\nThe service tunnel floor is concrete with a shallow drainage channel running down the centre.",
+      "tags": [
+        "maintenance",
+        "tunnel",
+        "service",
+        "runs",
+        "parallel",
+        "main"
+      ],
+      "exits": [
+        {
+          "to": "far_end",
+          "label": "Follow the far"
+        },
+        {
+          "to": "railway_platform",
+          "label": "Step the railway"
+        }
+      ],
+      "items": [
+        "hatch"
+      ]
+    },
+    {
+      "id": "railway_platform",
+      "title": "Railway Platform",
+      "text": "The railway platform sits below ground level, accessible by escalator from the transit hall.\n\nThe railway platform benches are fixed to the floor, the seats intact.\n\nThe railway platform is lit by strips of fluorescent light mounted low on the walls.",
+      "description": "The railway platform sits below ground level, accessible by escalator from the transit hall.\n\nThe railway platform benches are fixed to the floor, the seats intact.\n\nThe railway platform is lit by strips of fluorescent light mounted low on the walls.",
+      "tags": [
+        "railway",
+        "platform",
+        "sits",
+        "below",
+        "ground",
+        "level"
+      ],
+      "exits": [
+        {
+          "to": "maintenance_tunnel",
+          "label": "Step the maintenance"
+        },
+        {
+          "to": "south_bank",
+          "label": "Proceed the south"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "south_bank",
+      "title": "South Bank",
+      "text": "The rooftop of the eastern tower is accessible from the stairwell.\n\nThe stairwell climbs the eastern tower is accessible from the stairwell.\n\nThe underpass runs below the pedestrian bridge are intact except for one at the midpoint, which has been replaced with plywood.",
+      "description": "The rooftop of the eastern tower is accessible from the stairwell.\n\nThe stairwell climbs the eastern tower is accessible from the stairwell.\n\nThe underpass runs below the pedestrian bridge are intact except for one at the midpoint, which has been replaced with plywood.",
+      "tags": [
+        "south",
+        "bank",
+        "rooftop",
+        "eastern",
+        "tower",
+        "accessible"
+      ],
+      "exits": [
+        {
+          "to": "railway_platform",
+          "label": "Return the railway"
+        },
+        {
+          "to": "apartment_tower",
+          "label": "Proceed the apartment"
+        }
+      ],
+      "items": [
+        "stand"
+      ]
+    },
+    {
+      "id": "apartment_tower",
+      "title": "Apartment Tower",
+      "text": "The apartment tower stairwell is identical to the eastern tower has a reception desk facing the entrance.\n\nThe apartment tower lobby floor is polished concrete, still clean except for a single set of footprints in fine grey dust leading from.\n\nThe apartment tower lobby opens onto the pedestrian bridge along the south bank of the canal.",
+      "description": "The apartment tower stairwell is identical to the eastern tower has a reception desk facing the entrance.\n\nThe apartment tower lobby floor is polished concrete, still clean except for a single set of footprints in fine grey dust leading from.\n\nThe apartment tower lobby opens onto the pedestrian bridge along the south bank of the canal.",
+      "tags": [
+        "apartment",
+        "tower",
+        "stairwell",
+        "identical",
+        "eastern",
+        "reception"
+      ],
+      "exits": [
+        {
+          "to": "south_bank",
+          "label": "Push the south"
+        },
+        {
+          "to": "concrete_wall",
+          "label": "Pass the concrete"
+        }
+      ],
+      "items": [
+        "tie"
+      ]
+    },
+    {
+      "id": "concrete_wall",
+      "title": "Concrete Wall",
+      "text": "The car park occupies the basement and the first two levels below the plaza.\n\nThe western plant room leads to the loading bay.\n\nThe car park smells of oil and concrete dust.",
+      "description": "The car park occupies the basement and the first two levels below the plaza.\n\nThe western plant room leads to the loading bay.\n\nThe car park smells of oil and concrete dust.",
+      "tags": [
+        "concrete",
+        "wall",
+        "car",
+        "park",
+        "occupies",
+        "basement"
+      ],
+      "exits": [
+        {
+          "to": "apartment_tower",
+          "label": "Climb the apartment"
+        },
+        {
+          "to": "arcade",
+          "label": "Follow the arcade"
+        }
+      ],
+      "items": [
+        "cement"
+      ]
+    },
+    {
+      "id": "arcade",
+      "title": "Arcade",
+      "text": "The retail arcade connects the underpass to the central plaza.",
+      "description": "The retail arcade connects the underpass to the central plaza.",
+      "tags": [
+        "arcade",
+        "retail",
+        "connects",
+        "underpass",
+        "central",
+        "plaza"
+      ],
+      "exits": [
+        {
+          "to": "concrete_wall",
+          "label": "Return the concrete"
+        },
+        {
+          "to": "roof",
+          "label": "Climb the roof"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "roof",
+      "title": "Roof",
+      "text": "The roof of the apartment tower is not accessible from the stairwell.\n\nThe roof of the apartment tower lobby floor is carpeted, the carpet worn in a path from the door to the roof of.\n\nThe roof of the apartment tower is bolted from the outside.",
+      "description": "The roof of the apartment tower is not accessible from the stairwell.\n\nThe roof of the apartment tower lobby floor is carpeted, the carpet worn in a path from the door to the roof of.\n\nThe roof of the apartment tower is bolted from the outside.",
+      "tags": [
+        "roof",
+        "apartment",
+        "tower",
+        "accessible",
+        "stairwell",
+        "lobby"
+      ],
+      "exits": [
+        {
+          "to": "arcade",
+          "label": "Cross the arcade"
+        },
+        {
+          "to": "district",
+          "label": "Pass the district"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "district",
+      "title": "District",
+      "text": "The district extends further than any single route through it suggests.\n\nThe district perimeter is marked by a concrete wall three metres high running along the north side of the district.",
+      "description": "The district extends further than any single route through it suggests.\n\nThe district perimeter is marked by a concrete wall three metres high running along the north side of the district.",
+      "tags": [
+        "district",
+        "extends",
+        "further",
+        "any",
+        "single",
+        "route"
+      ],
+      "exits": [
+        {
+          "to": "roof",
+          "label": "Push the roof"
+        },
+        {
+          "to": "effigy",
+          "label": "Follow the effigy"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "effigy",
+      "title": "Effigy",
+      "text": "The eastern plant room is cooler and smells of damp.\n\nThe pedestrian bridge crosses the canal between the retail block and the apartment towers.\n\nThe pedestrian bridge is steel and glass, enclosed.",
+      "description": "The eastern plant room is cooler and smells of damp.\n\nThe pedestrian bridge crosses the canal between the retail block and the apartment towers.\n\nThe pedestrian bridge is steel and glass, enclosed.",
+      "tags": [
+        "effigy",
+        "eastern",
+        "plant",
+        "room",
+        "cooler",
+        "smells"
+      ],
+      "exits": [
+        {
+          "to": "district",
+          "label": "Pass the district"
+        },
+        {
+          "to": "centre",
+          "label": "Return the centre"
+        }
+      ],
+      "items": [
+        "wire"
+      ]
+    },
+    {
+      "id": "centre",
+      "title": "Centre",
+      "text": "The rooftop of the eastern plant room, someone has placed three objects in a line on the floor: a work glove, a glass.\n\nThe car park is still half full.\n\nThe pedestrian bridge is steel and glass, enclosed.",
+      "description": "The rooftop of the eastern plant room, someone has placed three objects in a line on the floor: a work glove, a glass.\n\nThe car park is still half full.\n\nThe pedestrian bridge is steel and glass, enclosed.",
+      "tags": [
+        "centre",
+        "rooftop",
+        "eastern",
+        "plant",
+        "room",
+        "placed"
+      ],
+      "exits": [
+        {
+          "to": "effigy",
+          "label": "Enter the effigy"
+        },
+        {
+          "to": "plaza",
+          "label": "Return the plaza"
+        }
+      ],
+      "items": [
+        "lift"
+      ]
+    },
+    {
+      "id": "plaza",
+      "title": "Plaza",
+      "text": "The central plaza opens between four office towers.",
+      "description": "The central plaza opens between four office towers.",
+      "tags": [
+        "plaza",
+        "central",
+        "opens",
+        "four",
+        "office",
+        "towers"
+      ],
+      "exits": [
+        {
+          "to": "centre",
+          "label": "Climb the centre"
+        },
+        {
+          "to": "entrance",
+          "label": "Follow the entrance"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "entrance",
+      "title": "Entrance",
+      "text": "The pedestrian bridge is steel and glass, enclosed.\n\nThe motorway overpass is low enough to touch from the top of the cement, upright, as if placed deliberately.\n\nThe rooftop of the eastern plant room, someone has placed three objects in a line on the floor: a work glove, a glass.",
+      "description": "The pedestrian bridge is steel and glass, enclosed.\n\nThe motorway overpass is low enough to touch from the top of the cement, upright, as if placed deliberately.\n\nThe rooftop of the eastern plant room, someone has placed three objects in a line on the floor: a work glove, a glass.",
+      "tags": [
+        "entrance",
+        "pedestrian",
+        "bridge",
+        "steel",
+        "glass",
+        "enclosed"
+      ],
+      "exits": [
+        {
+          "to": "plaza",
+          "label": "Follow the plaza"
+        },
+        {
+          "to": "walls",
+          "label": "Climb the walls"
+        }
+      ],
+      "items": []
+    },
+    {
+      "id": "walls",
+      "title": "Walls",
+      "text": "The central plaza opens between four office towers.\n\nThe western plant room reads four years ago.\n\nThe motorway overpass is constant and directional.",
+      "description": "The central plaza opens between four office towers.\n\nThe western plant room reads four years ago.\n\nThe motorway overpass is constant and directional.",
+      "tags": [
+        "walls",
+        "central",
+        "plaza",
+        "opens",
+        "four",
+        "office"
+      ],
+      "exits": [
+        {
+          "to": "entrance",
+          "label": "Return the entrance"
+        },
+        {
+          "to": "floor",
+          "label": "Enter the floor"
+        }
+      ],
+      "items": [
+        "cable"
+      ]
+    },
+    {
+      "id": "floor",
+      "title": "Floor",
+      "text": "The district extends further than any single route through it suggests.\n\nThe rooftop of the eastern tower has a reception desk facing the entrance.\n\nThe office lobby floor is carpeted, the carpet worn in a path from the door to the roof of the apartment tower is.",
+      "description": "The district extends further than any single route through it suggests.\n\nThe rooftop of the eastern tower has a reception desk facing the entrance.\n\nThe office lobby floor is carpeted, the carpet worn in a path from the door to the roof of the apartment tower is.",
+      "tags": [
+        "floor",
+        "district",
+        "extends",
+        "further",
+        "any",
+        "single"
+      ],
+      "exits": [
+        {
+          "to": "walls",
+          "label": "Push the walls"
+        },
+        {
+          "to": "western_plant_room",
+          "label": "Follow the western"
+        }
+      ],
+      "items": [
+        "lift"
+      ]
+    }
+  ]
+}

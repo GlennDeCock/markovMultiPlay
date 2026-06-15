@@ -10,10 +10,13 @@ import tkinter as tk
 # ---------------------------------------------------------------------------
 # Grid constants
 # ---------------------------------------------------------------------------
-COLS    = 100
-ROWS    = 100
-ZOOM    = 3
-HORIZON = 60   # row index where ground meets sky
+# Render at half resolution and upscale 2× — ~4× fewer noise samples (faster)
+# and chunkier, more defined e-ink pixels with naturally larger paper holes.
+COLS    = 280
+ROWS    = 280
+ZOOM    = 1
+HORIZON = 168  # row index where ground meets sky (≈0.6 × ROWS)
+_GS     = COLS / 140.0   # grid scale factor — keeps visual proportions when grid doubles
 
 # ---------------------------------------------------------------------------
 # Bayer 4×4 ordered dither matrix  (values 0..1)
@@ -51,7 +54,7 @@ def _value_noise(x: float, y: float, seed: int) -> float:
 
 def _layered_noise(seed: int) -> list[list[float]]:
     hmap = [[0.0] * COLS for _ in range(ROWS)]
-    octaves = [(0.07, 0.55, 0), (0.17, 0.30, 13337), (0.38, 0.15, 99991)]
+    octaves = [(0.035, 0.55, 0), (0.085, 0.30, 13337), (0.19, 0.15, 99991)]
     for freq, amp, s_off in octaves:
         for r in range(ROWS):
             for c in range(COLS):
@@ -74,6 +77,16 @@ def _layered_noise(seed: int) -> list[list[float]]:
 # ===========================================================================
 # Dithering + render
 # ===========================================================================
+
+def _apply_contrast(hmap, k: float) -> None:
+    """Push values away from mid-grey so silhouettes read as more defined
+    ink/paper edges.  Keeps 0 and 1 anchored; k>1 sharpens."""
+    for r in range(ROWS):
+        row = hmap[r]
+        for c in range(COLS):
+            v = 0.5 + (row[c] - 0.5) * k
+            row[c] = 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
+
 
 def _dither(hmap):
     grid = [[False] * COLS for _ in range(ROWS)]
@@ -106,17 +119,18 @@ def _draw_blob(hmap, cx, cy, seed,
     strength — how dark the core gets (0=black, 1=paper)
     noise_warp — how much value noise warps the boundary (0 = smooth ellipse)
     """
-    r1 = max(0,    cy - h - int(noise_warp) - 1)
-    r2 = min(ROWS, cy + h + int(noise_warp) + 2)
-    c1 = max(0,    cx - w - int(noise_warp) - 1)
-    c2 = min(COLS, cx + w + int(noise_warp) + 2)
+    _nw = noise_warp * _GS
+    r1 = max(0,    cy - h - int(_nw) - 1)
+    r2 = min(ROWS, cy + h + int(_nw) + 2)
+    c1 = max(0,    cx - w - int(_nw) - 1)
+    c2 = min(COLS, cx + w + int(_nw) + 2)
 
     ns = seed ^ noise_seed_off
     for r in range(r1, r2):
         for c in range(c1, c2):
             # warp the sample point with low-freq noise
-            warp_r = (_value_noise(c * 0.18, r * 0.18, ns)          - 0.5) * noise_warp
-            warp_c = (_value_noise(c * 0.18, r * 0.18, ns ^ 0x9E37) - 0.5) * noise_warp
+            warp_r = (_value_noise(c * 0.09, r * 0.09, ns)          - 0.5) * _nw
+            warp_c = (_value_noise(c * 0.09, r * 0.09, ns ^ 0x9E37) - 0.5) * _nw
             sr = r + warp_r - cy
             sc = c + warp_c - cx
             # elliptical distance
@@ -132,11 +146,12 @@ def _draw_blob(hmap, cx, cy, seed,
 
 def _draw_wide_band(hmap, cy, seed, band_h=6, strength=0.55):
     """A full-width flat band (ground, water, street, etc.)."""
-    for r in range(max(0, cy - band_h), min(ROWS, cy + band_h + 1)):
-        rel = abs(r - cy) / (band_h or 1)
+    _bh = int(band_h * _GS)
+    for r in range(max(0, cy - _bh), min(ROWS, cy + _bh + 1)):
+        rel = abs(r - cy) / (_bh or 1)
         density = (1.0 - rel) ** 1.4
         for c in range(COLS):
-            noise = _value_noise(c * 0.25, r * 0.25, seed) * 0.15
+            noise = _value_noise(c * 0.125, r * 0.125, seed) * 0.15
             target = 1.0 - density * strength + noise
             if target < hmap[r][c]:
                 hmap[r][c] = target
@@ -354,21 +369,21 @@ def _s_key(hmap, cx, cy, seed, scale=1.0):
 
 _FALLBACKS = [
     lambda hmap, seed: _draw_blob(hmap, COLS//2, ROWS//3, seed,
-                                   w=14, h=20, strength=0.88, noise_warp=4.0),
-    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON-6, seed,
-                                   w=10, h=10, strength=0.80, noise_warp=5.0),
+                                   w=28, h=40, strength=0.88, noise_warp=4.0),
+    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON-12, seed,
+                                   w=20, h=20, strength=0.80, noise_warp=5.0),
     lambda hmap, seed: _draw_wide_band(hmap, HORIZON, seed,
                                         band_h=8, strength=0.55),
-    lambda hmap, seed: _draw_blob(hmap, COLS//3, HORIZON-4, seed,
-                                   w=8, h=14, strength=0.85, noise_warp=4.5),
-    lambda hmap, seed: _draw_blob(hmap, COLS*2//3, HORIZON-4, seed ^ 0xAB,
-                                   w=6, h=18, strength=0.88, noise_warp=3.5),
-    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON+6, seed,
-                                   w=16, h=5, strength=0.60, noise_warp=6.0),
-    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON-2, seed,
-                                   w=20, h=8, strength=0.72, noise_warp=5.0),
+    lambda hmap, seed: _draw_blob(hmap, COLS//3, HORIZON-8, seed,
+                                   w=16, h=28, strength=0.85, noise_warp=4.5),
+    lambda hmap, seed: _draw_blob(hmap, COLS*2//3, HORIZON-8, seed ^ 0xAB,
+                                   w=12, h=36, strength=0.88, noise_warp=3.5),
+    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON+12, seed,
+                                   w=32, h=10, strength=0.60, noise_warp=6.0),
+    lambda hmap, seed: _draw_blob(hmap, COLS//2, HORIZON-4, seed,
+                                   w=40, h=16, strength=0.72, noise_warp=5.0),
     lambda hmap, seed: _draw_blob(hmap, COLS//2, ROWS*2//5, seed,
-                                   w=12, h=22, strength=0.90, noise_warp=4.0),
+                                   w=24, h=44, strength=0.90, noise_warp=4.0),
 ]
 
 
@@ -529,40 +544,278 @@ def _draw_shapes(hmap, text, seed):
 
 
 def _role_position(role, idx, total, seed, slot):
-    jx = int((_hash_val(slot, 0, seed ^ 0x1111) - 0.5) * 24)
-    jy = int((_hash_val(0, slot, seed ^ 0x2222) - 0.5) * 10)
+    jx = int((_hash_val(slot, 0, seed ^ 0x1111) - 0.5) * 48)
+    jy = int((_hash_val(0, slot, seed ^ 0x2222) - 0.5) * 20)
 
     if role == "bg":
         cx = COLS // 2 + jx // 2
         cy = ROWS * 2 // 5 + jy // 2
-        scale = 1.3 + _hash_val(slot, slot, seed) * 0.3
+        scale = 2.6 + _hash_val(slot, slot, seed) * 0.6
     elif role == "mg":
         base_x = [COLS // 3, COLS * 2 // 3, COLS // 2]
         cx = base_x[slot % 3] + jx
-        cy = HORIZON - 4 + jy // 2
-        scale = 0.85 + _hash_val(slot, slot + 1, seed) * 0.25
+        cy = HORIZON - 8 + jy // 2
+        scale = 1.7 + _hash_val(slot, slot + 1, seed) * 0.5
     else:
         base_x = [COLS // 4, COLS * 3 // 4, COLS // 2]
         cx = base_x[slot % 3] + jx
-        cy = HORIZON + 5 + abs(jy) // 2
-        scale = 0.65 + _hash_val(slot, slot + 2, seed) * 0.2
+        cy = HORIZON + 10 + abs(jy) // 2
+        scale = 1.3 + _hash_val(slot, slot + 2, seed) * 0.4
 
-    cx = max(12, min(COLS - 12, cx))
-    cy = max(6,  min(ROWS - 8, cy))
+    cx = max(24, min(COLS - 24, cx))
+    cy = max(12,  min(ROWS - 16, cy))
     return cx, cy, scale
+
+
+# ===========================================================================
+# Organic edge mask
+# ===========================================================================
+
+# Fraction of the half-diagonal at which the scene is still fully shown.
+# Beyond this it fades to paper.  Values < 1.0 = inner radius, > 1.0 = outer.
+EDGE_INNER    = 0.40   # scene fully opaque inside this normalised radius
+EDGE_OUTER    = 0.90   # scene fully dissolved to paper outside this radius
+EDGE_WARP     = 0.38   # how much low-freq noise warps the boundary (0 = perfect ellipse)
+# Spikes point to the 4 canvas corners → perspective/room-edge illusion.
+# SPIKE_REACH extends them to or past the canvas boundary.
+SPIKE_REACH   = 0.70   # how far beyond EDGE_OUTER spikes extend (in normalised units)
+SPIKE_WIDTH   = 0.09   # angular half-width of each spike (radians) — wider = softer room edge
+HORIZON_WIDTH = 0.30   # angular half-width of horizon-mode spikes (wide → reads as a horizon)
+BLOB_COUNT    = 2      # number of loose scatter blobs outside the main shape
+BLOB_RADIUS   = 0.18   # normalised radius of each scatter blob (bigger = larger paper holes)
+BLOB_ZONE_MIN = 0.5   # scatter blobs start at this distance from centre
+BLOB_ZONE_MAX = 0.8   # and extend to this distance
+
+
+def _apply_organic_mask(hmap: list[list[float]], seed: int) -> None:
+    """Push edge cells toward paper using a noise-warped elliptical falloff.
+
+    Also carves long thin spikes reaching outward from the boundary and
+    plants small loose ink blobs scattered around the outside.
+    """
+    import math
+
+    cx = COLS / 2.0
+    cy = ROWS / 2.0
+
+    mask_seed = seed ^ 0xD1CE_FA11
+
+    # Spike layout has two seeded modes:
+    #   • "room"    — 4 spikes toward the canvas corners → perspective room/space
+    #   • "horizon" — 2 wide spikes left & right → a horizontal opening / horizon
+    # ~1 in 3 scenes use the horizon layout.
+    mode_roll = _hash_val(7, 7, mask_seed ^ 0x5EED)
+    spikes = []   # list of (angle, half_width)
+    if mode_roll < 0.34:
+        for i, base_angle in enumerate([0.0, math.pi]):
+            jitter = (_hash_val(i, 9, mask_seed ^ 0xABCD) - 0.5) * 0.12
+            spikes.append((base_angle + jitter, HORIZON_WIDTH))
+    else:
+        for i, base_angle in enumerate([math.pi * 0.25, math.pi * 0.75,
+                                         math.pi * 1.25, math.pi * 1.75]):
+            jitter = (_hash_val(i, 0, mask_seed ^ 0xABCD) - 0.5) * 0.18
+            spikes.append((base_angle + jitter, SPIKE_WIDTH))
+
+    # --- Build scatter blob centres (in normalised dx/dy space) ---
+    scatter_blobs = []
+    for i in range(BLOB_COUNT):
+        angle  = _hash_val(i, 1, mask_seed ^ 0x1234) * 2 * math.pi
+        radius = (BLOB_ZONE_MIN
+                  + _hash_val(i, 2, mask_seed ^ 0x5678)
+                  * (BLOB_ZONE_MAX - BLOB_ZONE_MIN))
+        bx = math.cos(angle) * radius
+        by = math.sin(angle) * radius
+        # blob strength: darker blobs look more like detached ink flecks
+        strength = 0.3 + _hash_val(i, 3, mask_seed ^ 0x9ABC) * 0.4
+        scatter_blobs.append((bx, by, BLOB_RADIUS, strength))
+
+    for r in range(ROWS):
+        for c in range(COLS):
+            dx = (c - cx) / cx          # –1 .. +1
+            dy = (r - cy) / cy          # –1 .. +1
+
+            # Noise warp: shift the sample point, making the boundary irregular
+            wx = _value_noise(c * 0.06, r * 0.06, mask_seed)          - 0.5
+            wy = _value_noise(c * 0.06, r * 0.06, mask_seed ^ 0x9E37) - 0.5
+            dxw = dx + wx * EDGE_WARP
+            dyw = dy + wy * EDGE_WARP
+
+            dist = (dxw ** 2 + dyw ** 2) ** 0.5   # 0 at centre, ~1.4 at corner
+
+            # --- Check if cell is inside any scatter blob ---
+            in_blob = False
+            for bx, by, br, bstrength in scatter_blobs:
+                bd = ((dx - bx) ** 2 + (dy - by) ** 2) ** 0.5
+                if bd < br:
+                    t = bd / br
+                    m = t * t * (3.0 - 2.0 * t)   # smoothstep 0=centre 1=edge
+                    hmap[r][c] = hmap[r][c] * (1.0 - (1.0 - m) * bstrength)
+                    in_blob = True
+                    break
+            if in_blob:
+                continue
+
+            if dist <= EDGE_INNER:
+                continue                           # fully inside — unchanged
+
+            # --- Check if cell falls inside a spike ---
+            angle = math.atan2(dy, dx)
+            in_spike = False
+            for sa, sw in spikes:
+                da = abs(math.atan2(math.sin(angle - sa),
+                                    math.cos(angle - sa)))   # angular diff, 0..π
+                if da < sw:
+                    spike_outer = EDGE_OUTER + SPIKE_REACH * (1.0 - da / sw)
+                    if dist < spike_outer:
+                        t = max(0.0, (dist - EDGE_INNER) / (spike_outer - EDGE_INNER))
+                        m = t * t * (3.0 - 2.0 * t)
+                        hmap[r][c] = hmap[r][c] + m * (1.0 - hmap[r][c]) * 0.7
+                        in_spike = True
+                        break
+            if in_spike:
+                continue
+
+            if dist >= EDGE_OUTER:
+                hmap[r][c] = 1.0                  # fully dissolved to paper
+                continue
+
+            # Smoothstep between inner and outer radius
+            t = (dist - EDGE_INNER) / (EDGE_OUTER - EDGE_INNER)
+            m = t * t * (3.0 - 2.0 * t)           # 0 inside → 1 outside
+
+            # Blend current value toward paper (1.0)
+            hmap[r][c] = hmap[r][c] + m * (1.0 - hmap[r][c])
 
 
 # ===========================================================================
 # Public API
 # ===========================================================================
 
+# ---------------------------------------------------------------------------
+# Image caches (keyed by generation parameters — avoids re-rendering on
+# revisiting the same node or choice label)
+# ---------------------------------------------------------------------------
+_scene_cache:  dict = {}
+_choice_cache: dict = {}
+
+
 def generate_scene_image(
     text: str,
     ink: str   = "#0f0f0c",
     paper: str = "#dcdcd0",
 ) -> "tk.PhotoImage":
+    key = (text, ink, paper)
+    if key in _scene_cache:
+        return _scene_cache[key]
     seed = hash(text) & 0xFFFF_FFFF
     hmap = _layered_noise(seed)
     _draw_shapes(hmap, text, seed)
+    _apply_organic_mask(hmap, seed)
+    _apply_contrast(hmap, 1.45)
     grid = _dither(hmap)
-    return _to_photoimage(grid, ink, paper)
+    img = _to_photoimage(grid, ink, paper)
+    _scene_cache[key] = img
+    return img
+
+
+def generate_choice_image(
+    text: str,
+    grid_size: int = 70,
+    zoom: int = 2,
+    ink: str   = "#0f0f0c",
+    paper: str = "#dcdcd0",
+) -> "tk.PhotoImage":
+    """Noisy eight-spiked star for a choice button.
+
+    Interior and exterior are paper.  The star band boundary is dense ink
+    warped by noise and dithered with the Bayer matrix, so it reads like
+    the scene noise map rather than a clean line.
+    """
+    import math
+
+    key = (text, grid_size, zoom, ink, paper)
+    if key in _choice_cache:
+        return _choice_cache[key]
+
+    seed = (hash(text) ^ 0xC401_5E7D) & 0xFFFF_FFFF
+    n = grid_size
+    ccx = (n - 1) / 2.0
+    ccy = (n - 1) / 2.0
+
+    SPIKES     = 8
+    STAR_OUTER = 0.92    # spike-tip radius (normalised) — pushed out to edge
+    STAR_INNER = 0.70    # valley radius — higher = ring closer to edge, big open centre
+    BAND_HALF  = 0.08    # half-thickness of dithered band
+    WARP       = 0.22    # low-freq boundary warp (less warp keeps star legible)
+    CHAOS      = 0.28    # high-freq breaks
+    BUBBLE     = 0.8    # threshold: noise > this punches a paper hole
+
+    hmap = [[1.0] * n for _ in range(n)]   # start all paper
+    for r in range(n):
+        for c in range(n):
+            dx = (c - ccx) / ccx
+            dy = (r - ccy) / ccy
+
+            # Warp the sample point with two noise layers → organic, chaotic
+            wx = (_value_noise(c * 0.14, r * 0.14, seed)          - 0.5) * WARP
+            wy = (_value_noise(c * 0.14, r * 0.14, seed ^ 0x9E37) - 0.5) * WARP
+            wx += (_value_noise(c * 0.55, r * 0.55, seed ^ 0xFACE) - 0.5) * CHAOS
+            wy += (_value_noise(c * 0.55, r * 0.55, seed ^ 0xCAFE) - 0.5) * CHAOS
+            sx, sy = dx + wx, dy + wy
+
+            dist  = (sx * sx + sy * sy) ** 0.5
+            angle = math.atan2(sy, sx)
+
+            # Star radius at this angle: triangle wave between outer & inner
+            phase = (angle * SPIKES / (2 * math.pi)) % 1.0   # 0..1 per spike
+            tri   = abs(phase * 2.0 - 1.0)                    # 1 at tip, 0 at valley
+            star_r = STAR_INNER + (STAR_OUTER - STAR_INNER) * tri
+
+            band_dist = abs(dist - star_r)
+            if band_dist >= BAND_HALF:
+                continue
+
+            # Bubble holes punch random paper gaps in the band
+            bubble_n = _value_noise(c * 0.38, r * 0.38, seed ^ 0xB0BB)
+            if bubble_n > BUBBLE:
+                continue
+
+            # Inside the band: sample noise, darken toward the band centre
+            v = _value_noise(c * 0.25, r * 0.25, seed ^ 0x1A2B)
+            v = v * v * (3 - 2 * v)
+            t = band_dist / BAND_HALF
+            blend = 1.0 - t * t * (3 - 2 * t)
+            hmap[r][c] = max(0.0, v - 0.30 * blend)
+
+    rows_data = []
+    for r in range(n):
+        row_colors = [ink if hmap[r][c] < _B4[r % 4][c % 4] else paper
+                      for c in range(n)]
+        rows_data.append("{" + " ".join(row_colors) + "}")
+    img = tk.PhotoImage(width=n, height=n)
+    img.put(" ".join(rows_data))
+    result = img if zoom == 1 else img.zoom(zoom)
+    _choice_cache[key] = result
+    return result
+
+
+def generate_scene_pil_image(text: str, zoom: int = 3) -> "Image":
+    """Same procedural scene, returned as a 1-bit PIL Image.
+    Pixel values: 1 = paper (white), 0 = ink (black).
+    zoom: scale factor (3 → 300×300, 2 → 200×200, 1 → 100×100).
+    Used by player_renderer.py for Pi Zero e-paper output."""
+    from PIL import Image as _PILImage
+    seed = hash(text) & 0xFFFF_FFFF
+    hmap = _layered_noise(seed)
+    _draw_shapes(hmap, text, seed)
+    _apply_organic_mask(hmap, seed)
+    grid = _dither(hmap)
+    img = _PILImage.new("1", (COLS, ROWS), 1)
+    for r in range(ROWS):
+        for c in range(COLS):
+            if grid[r][c]:
+                img.putpixel((c, r), 0)
+    if zoom != 1:
+        w, h = img.size
+        img = img.resize((w * zoom, h * zoom), _PILImage.NEAREST)
+    return img

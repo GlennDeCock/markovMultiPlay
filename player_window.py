@@ -5,8 +5,8 @@ player_window.py — Individual player window, styled as an E-Ink screen.
 
 import tkinter as tk
 from tkinter import font as tkfont
-from engine import STATUS_ACTIVE, STATUS_COLLISION, STATUS_GAME_OVER
-from image_gen import generate_scene_image
+from engine import STATUS_ACTIVE, STATUS_ENCOUNTER, STATUS_GAME_OVER
+from image_gen import generate_scene_image, generate_choice_image
 
 # ---------------------------------------------------------------------------
 # E-Ink palette
@@ -19,39 +19,33 @@ INK_RULE  = "#aaaaA0"
 WIN_BG    = "#0a0a08"
 
 # ---------------------------------------------------------------------------
-# Layout  (all px, paper = 784 × 584)
-# image 300×300 + padding / text / buttons
+# Layout  (all px, 480×800 portrait e-ink)
 # ---------------------------------------------------------------------------
-BEZEL  = 8
-SCR_W  = 600
+BEZEL  = 0
+SCR_W  = 480
 SCR_H  = 800
-PW     = SCR_W - BEZEL * 2   # 584
-PH     = SCR_H - BEZEL * 2   # 784
+PW     = SCR_W
+PH     = SCR_H
 
-IMG_W   = 300                         # 100×100 grid rendered at ZOOM=3
-IMG_H   = 300
-IMG_PAD = 12                          # whitespace above/below image
-SEP1_Y  = IMG_H + IMG_PAD * 2        # 324 — bottom of image zone
-IMG_TOP = IMG_PAD                     # 12  — top of image
-IMG_X   = (PW - IMG_W) // 2          # 142 — horizontally centred
+IMG_W   = 280                         # 280×280 grid rendered at ZOOM=1 → 280px (1px dots)
+IMG_H   = 280
+IMG_PAD = 8
+IMG_TOP = 18                          # dropped 10px from top
+IMG_X   = (PW - IMG_W) // 2          # 100
+SEP1_Y  = IMG_TOP + IMG_H + IMG_PAD  # 306
 
-TEXT_Y  = SEP1_Y + 2                  # 326
-BTN_CV_H = 80                         # kept for restart-button sizing compat
-BTN_PAD = 16
-BTN_GAP = 10
-BTN_W   = (PW - BTN_PAD * 2 - BTN_GAP) // 2
-BTN_H   = BTN_CV_H + 24
-
-# Choice button zone (replaces fixed 2-button strip)
-CHOICE_BTN_H   = 40                   # height of each choice button canvas
-CHOICE_GAP     = 5                    # gap between buttons
-CHOICE_PAD     = 16                   # horizontal padding
-MAX_CHOICES    = 5                    # pre-built button slots
-_CHOICE_ZONE   = MAX_CHOICES * CHOICE_BTN_H + (MAX_CHOICES - 1) * CHOICE_GAP  # 220
-SEP2_Y         = PH - _CHOICE_ZONE - 8    # bottom of text zone  (~556)
-TEXT_H         = SEP2_Y - TEXT_Y          # text area height     (~230)
-CHOICE_Y_START = SEP2_Y + 6              # first button top y    (~562)
-CHOICE_W       = PW - CHOICE_PAD * 2     # button width          (552)
+TEXT_Y  = SEP1_Y + 9                 # ~20% more gap
+TRACE_H = 28
+MAX_CHOICES   = 2
+CHOICE_D      = 200                   # grid_size=100 at zoom=2 → 200px diameter
+CHOICE_R      = CHOICE_D // 2
+CHOICE_LX     = PW // 4
+CHOICE_RX     = 3 * PW // 4
+CHOICE_Y_CTR  = PH - CHOICE_R - 20
+SEP2_Y        = CHOICE_Y_CTR - CHOICE_R - TRACE_H - 8
+TEXT_H        = SEP2_Y - TEXT_Y
+TRACE_Y       = SEP2_Y + 4
+_TEXT_PADY    = 10                    # small fixed padding; zone height handles centering
 
 
 class PlayerWindow:
@@ -69,6 +63,12 @@ class PlayerWindow:
         self.win.configure(bg=WIN_BG)
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Bind A/B keys to choice 0/1 for Digispark hardware support
+        self.win.bind("<Key-a>", lambda e: self._on_choice(0))
+        self.win.bind("<Key-A>", lambda e: self._on_choice(0))
+        self.win.bind("<Key-b>", lambda e: self._on_choice(1))
+        self.win.bind("<Key-B>", lambda e: self._on_choice(1))
+
         self._build_ui()
         self._refresh_from_state()
 
@@ -83,12 +83,7 @@ class PlayerWindow:
         paper.pack_propagate(False)
         self._paper = paper
 
-        # ── Outer dotted border (canvas behind everything) ────────────
-        border_cv = tk.Canvas(paper, width=PW, height=PH,
-                              bg=PAPER, highlightthickness=0, bd=0)
-        border_cv.place(x=0, y=0)
-        _dotted_rect(border_cv, 4, 4, PW - 4, PH - 4)
-        # stays at bottom z-order (created first)
+        # ── Outer border: none ──────────────────────────────────────────
 
         # ── Scene image ───────────────────────────────────────────────
         self._img_label = tk.Label(paper, bg=PAPER, bd=0,
@@ -101,31 +96,44 @@ class PlayerWindow:
             paper, wrap="word",
             bg=PAPER, fg=INK, font=mono,
             relief="flat", bd=0, state="disabled",
-            cursor="arrow", spacing1=5, spacing3=5,
-            highlightthickness=0, padx=24, pady=10,
+            cursor="arrow", spacing1=4, spacing3=4,
+            highlightthickness=0, padx=24, pady=_TEXT_PADY,
         )
+        self.text_box.tag_configure("center", justify="center")
         self.text_box.place(x=0, y=TEXT_Y, width=PW, height=TEXT_H)
 
-        # ── Choice buttons (vertical stack, MAX_CHOICES pre-built slots) ──
-        bfont = tkfont.Font(family="Courier", size=10)
-        self._choice_buttons: list = []   # list of (canvas, text_item_id)
-        for i in range(MAX_CHOICES):
-            y_pos = CHOICE_Y_START + i * (CHOICE_BTN_H + CHOICE_GAP)
-            cv = tk.Canvas(paper, width=CHOICE_W, height=CHOICE_BTN_H,
+        # ── Choice stars (noise-map dithered eight-spiked star) ────────
+        bfont = tkfont.Font(family="Courier", size=8)
+        self._choice_buttons: list = []
+        self._choice_photos:  list = []
+        for i, cx_pos in enumerate([CHOICE_LX, CHOICE_RX]):
+            x0 = cx_pos - CHOICE_R
+            y0 = CHOICE_Y_CTR - CHOICE_R
+            cv = tk.Canvas(paper, width=CHOICE_D, height=CHOICE_D,
                            bg=PAPER, highlightthickness=0, bd=0,
                            cursor="hand2")
-            cv.place(x=CHOICE_PAD, y=y_pos)
-            _dotted_rect(cv, 1, 1, CHOICE_W - 1, CHOICE_BTN_H - 1)
+            cv.place(x=x0, y=y0)
+            photo = generate_choice_image("", grid_size=200, zoom=1, ink=INK, paper=PAPER)
+            self._choice_photos.append(photo)
+            img_id = cv.create_image(0, 0, image=photo, anchor="nw")
             txt_id = cv.create_text(
-                16, CHOICE_BTN_H // 2, text="",
+                CHOICE_R, CHOICE_R, text="",
                 fill=INK, font=bfont,
-                width=CHOICE_W - 24, justify="left", anchor="w",
+                width=CHOICE_D - 56, justify="center", anchor="center",
             )
             idx = i
             cv.bind("<Button-1>", lambda e, i=idx: self._on_choice(i))
-            cv.bind("<Enter>",    lambda e, c=cv: c.configure(bg=PAPER_HOV))
-            cv.bind("<Leave>",    lambda e, c=cv: c.configure(bg=PAPER))
-            self._choice_buttons.append((cv, txt_id))
+            self._choice_buttons.append((cv, img_id, txt_id))
+
+        # ── Trace line (distinct dimmed line below sep2) ───────────────
+        self._lbl_trace = tk.Label(
+            paper, text="", bg=PAPER, fg=INK_DIM,
+            font=("Courier", 8), anchor="center",
+            wraplength=PW - 32, justify="center",
+        )
+        self._lbl_trace.place(x=16, y=TRACE_Y, width=PW - 32, height=TRACE_H)
+
+        # ── Co-presence overlay widget removed (replaced by encounter system) ──
 
         # ── Restart button (hidden by default) ────────────────────────
         self._btn_restart = tk.Button(
@@ -143,19 +151,7 @@ class PlayerWindow:
         )
         self._lbl_node.place(x=PW - 100, y=SEP1_Y + 2, width=92)
 
-        # ── Separator lines — created LAST so they sit on top ─────────
-        # Each is a thin Canvas strip placed over the relevant y position.
-        sep1 = tk.Canvas(paper, width=PW, height=3,
-                         bg=PAPER, highlightthickness=0, bd=0)
-        sep1.place(x=0, y=SEP1_Y)
-        sep1.create_line(18, 1, PW - 18, 1,
-                         fill=INK_RULE, dash=(2, 5), width=1)
-
-        sep2 = tk.Canvas(paper, width=PW, height=3,
-                         bg=PAPER, highlightthickness=0, bd=0)
-        sep2.place(x=0, y=SEP2_Y)
-        sep2.create_line(18, 1, PW - 18, 1,
-                         fill=INK_RULE, dash=(2, 5), width=1)
+        # ── Separator lines: none ────────────────────────────────────────
 
     # ------------------------------------------------------------------
     # State → UI
@@ -166,51 +162,59 @@ class PlayerWindow:
         if state is None:
             return
 
-        # Get the correct node regardless of engine mode
         node  = self.engine.active_graph.nodes.get(state.current_node)
         links = state.current_links
-        if state.status == STATUS_COLLISION and state.collision_overlay_text:
-            text = state.collision_overlay_text
-        else:
-            text = node.text if node else ""
+
+        # Main text: always show node's drifted current_text
+        node_text = self.engine.get_display_text(state.current_node)
+        if not node_text and node:
+            node_text = node.text
 
         self._lbl_node.configure(text=state.current_node)
-        self._set_text(text)
-        self._update_image(text)
+
+        # Encounter: show the encounter text, hide choices, skip trace
+        if state.status == STATUS_ENCOUNTER:
+            self._set_text(state.encounter_text or "")
+            # keep current scene image — no regeneration
+            self._lbl_trace.configure(text="")
+            self._btn_restart.place_forget()
+            for cv, *_ in self._choice_buttons:
+                cv.place_forget()
+            return
+
+        self._set_text(node_text)
+        self._update_image(node_text)
+
+        # Trace line — shows carried item when player has inventory.
+        # Drift/edits now live in the node text itself, so we no longer echo
+        # a separate trace fragment here.
+        if getattr(state, "inventory", None):
+            self._lbl_trace.configure(text=f"[carrying: {state.inventory_label}]")
+        else:
+            self._lbl_trace.configure(text="")
 
         if state.status == STATUS_GAME_OVER:
-            for cv, _ in self._choice_buttons:
+            for cv, *_ in self._choice_buttons:
                 cv.place_forget()
             self._btn_restart.place(x=0, y=SEP2_Y + 2,
-                                    width=PW, height=_CHOICE_ZONE + 6)
+                                    width=PW, height=PH - SEP2_Y - 10)
         else:
             self._btn_restart.place_forget()
-
-            # Build display list: (prefix, label) per choice
             choices = links or []
-            if state.status == STATUS_COLLISION and state.collision_choice_labels:
-                col_labels = state.collision_choice_labels
-                display = []
-                for i, lnk in enumerate(choices[:MAX_CHOICES]):
-                    label = col_labels[i] if i < len(col_labels) else lnk.label
-                    display.append(("->  ", label))
-            else:
-                display = []
-                for ch in choices[:MAX_CHOICES]:
-                    ctype = getattr(ch, "choice_type", "exit")
-                    if ctype == "interact":
-                        pfx = "o  "
-                    elif getattr(ch, "is_cross", False):
-                        pfx = "~  "
-                    else:
-                        pfx = "->  "
-                    display.append((pfx, ch.label))
+            display = []
+            for ch in choices[:MAX_CHOICES]:
+                pfx = "↺  " if getattr(ch, "is_cross", False) else "→  "
+                display.append((pfx, ch.label))
 
-            for i, (cv, txt_id) in enumerate(self._choice_buttons):
-                y_pos = CHOICE_Y_START + i * (CHOICE_BTN_H + CHOICE_GAP)
+            cx_positions = [CHOICE_LX, CHOICE_RX]
+            for i, (cv, img_id, txt_id) in enumerate(self._choice_buttons):
                 if i < len(display):
                     pfx, label = display[i]
-                    cv.place(x=CHOICE_PAD, y=y_pos)
+                    cx_pos = cx_positions[i]
+                    cv.place(x=cx_pos - CHOICE_R, y=CHOICE_Y_CTR - CHOICE_R)
+                    photo = generate_choice_image(label, grid_size=200, zoom=1, ink=INK, paper=PAPER)
+                    self._choice_photos[i] = photo
+                    cv.itemconfigure(img_id, image=photo)
                     cv.itemconfigure(txt_id, text=pfx + label)
                 else:
                     cv.place_forget()
@@ -218,7 +222,7 @@ class PlayerWindow:
     def _set_text(self, text: str):
         self.text_box.configure(state="normal")
         self.text_box.delete("1.0", "end")
-        self.text_box.insert("end", text)
+        self.text_box.insert("end", text, "center")
         self.text_box.configure(state="disabled")
 
     def _update_image(self, text: str):
@@ -234,10 +238,9 @@ class PlayerWindow:
         state = self.engine.players.get(self.player_id)
         if state is None:
             return
-        if state.status == STATUS_COLLISION:
-            self.engine.resolve_collision_choice(self.player_id, index)
-        else:
-            self.engine.make_choice(self.player_id, index)
+        if state.status == STATUS_ENCOUNTER:
+            return  # locked during encounter
+        self.engine.make_choice(self.player_id, index)
         self._refresh_from_state()
         self.on_event(refresh_only=True)
 
@@ -267,10 +270,3 @@ class PlayerWindow:
 # ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
-
-def _dotted_rect(cv, x1, y1, x2, y2):
-    d = dict(fill=INK_RULE, dash=(2, 5), width=1)
-    cv.create_line(x1, y1, x2, y1, **d)
-    cv.create_line(x2, y1, x2, y2, **d)
-    cv.create_line(x2, y2, x1, y2, **d)
-    cv.create_line(x1, y2, x1, y1, **d)

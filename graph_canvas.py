@@ -34,6 +34,17 @@ C_NODE_MUTATED     = "#3a2a0a"
 C_NODE_MUTATED_BDR = "#cc8822"
 
 
+def _lerp_hex(c1: str, c2: str, t: float) -> str:
+    """Linearly interpolate between two hex colours."""
+    t = max(0.0, min(1.0, t))
+    r1, g1, b1 = int(c1[1:3],16), int(c1[3:5],16), int(c1[5:7],16)
+    r2, g2, b2 = int(c2[1:3],16), int(c2[3:5],16), int(c2[5:7],16)
+    r = int(r1 + (r2 - r1) * t)
+    g = int(g1 + (g2 - g1) * t)
+    b = int(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
 
 class GraphCanvas:
     """
@@ -74,10 +85,25 @@ class GraphCanvas:
         self._pos: dict[str, list] = {}
         self._animating = False
 
+        # Zoom / pan state
+        self._zoom     = 1.0
+        self._view_cx  = width  / 2.0
+        self._view_cy  = height / 2.0
+        self._drag_start: tuple | None = None
+        self._drag_vc:    tuple | None = None
+
         # Tooltip
         self._tip_id = None
         self.canvas.bind("<Motion>", self._on_mouse_move)
         self.canvas.bind("<Leave>",  self._on_mouse_leave)
+
+        # Zoom (mouse wheel) and pan (right-click drag)
+        self.canvas.bind("<MouseWheel>",      self._on_zoom)       # Windows
+        self.canvas.bind("<Button-4>",        self._on_zoom_in)    # Linux scroll up
+        self.canvas.bind("<Button-5>",        self._on_zoom_out)   # Linux scroll down
+        self.canvas.bind("<ButtonPress-3>",   self._on_pan_start)
+        self.canvas.bind("<B3-Motion>",       self._on_pan_drag)
+        self.canvas.bind("<Double-Button-1>", self._reset_view)
 
         self._draw()
 
@@ -126,6 +152,65 @@ class GraphCanvas:
         return (cx, cy)
 
     # ------------------------------------------------------------------
+    # Coordinate transforms (zoom / pan)
+    # ------------------------------------------------------------------
+
+    def _to_screen(self, wx: float, wy: float) -> tuple:
+        """Convert world coordinates to canvas pixel coordinates."""
+        sx = self.width  / 2 + (wx - self._view_cx) * self._zoom
+        sy = self.height / 2 + (wy - self._view_cy) * self._zoom
+        return sx, sy
+
+    def _from_screen(self, sx: float, sy: float) -> tuple:
+        """Convert canvas pixel coordinates to world coordinates."""
+        wx = self._view_cx + (sx - self.width  / 2) / self._zoom
+        wy = self._view_cy + (sy - self.height / 2) / self._zoom
+        return wx, wy
+
+    def _on_zoom(self, event):
+        """Mouse-wheel zoom centred on the pointer (Windows)."""
+        factor = 1.15 if event.delta > 0 else 1 / 1.15
+        self._apply_zoom(factor, event.x, event.y)
+
+    def _on_zoom_in(self, event):
+        """Scroll-up zoom (Linux)."""
+        self._apply_zoom(1.15, event.x, event.y)
+
+    def _on_zoom_out(self, event):
+        """Scroll-down zoom (Linux)."""
+        self._apply_zoom(1 / 1.15, event.x, event.y)
+
+    def _apply_zoom(self, factor: float, mx: int, my: int):
+        new_zoom = max(0.15, min(10.0, self._zoom * factor))
+        # Keep the world point under the mouse fixed in screen space
+        wx, wy = self._from_screen(mx, my)
+        self._zoom = new_zoom
+        self._view_cx = wx - (mx - self.width  / 2) / new_zoom
+        self._view_cy = wy - (my - self.height / 2) / new_zoom
+        self._draw()
+
+    def _on_pan_start(self, event):
+        self._drag_start = (event.x, event.y)
+        self._drag_vc    = (self._view_cx, self._view_cy)
+
+    def _on_pan_drag(self, event):
+        if self._drag_start is None:
+            return
+        dx = event.x - self._drag_start[0]
+        dy = event.y - self._drag_start[1]
+        vcx, vcy = self._drag_vc
+        self._view_cx = vcx - dx / self._zoom
+        self._view_cy = vcy - dy / self._zoom
+        self._draw()
+
+    def _reset_view(self, event=None):
+        """Double-click to reset zoom and pan to defaults."""
+        self._zoom    = 1.0
+        self._view_cx = self.width  / 2.0
+        self._view_cy = self.height / 2.0
+        self._draw()
+
+    # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
 
@@ -152,8 +237,8 @@ class GraphCanvas:
         for link in graph.links.values():
             if link.from_node not in self._pos or link.to_node not in self._pos:
                 continue
-            x1, y1 = self._pos[link.from_node]
-            x2, y2 = self._pos[link.to_node]
+            x1, y1 = self._to_screen(*self._pos[link.from_node])
+            x2, y2 = self._to_screen(*self._pos[link.to_node])
 
             on_path = (link.from_node, link.to_node) in path_set
             color   = C_LINK_CROSS if link.is_cross else C_LINK
@@ -185,7 +270,7 @@ class GraphCanvas:
 
         # --- Draw nodes ---
         for node_id, pos in self._pos.items():
-            x, y  = pos
+            x, y  = self._to_screen(*pos)
             node  = graph.nodes.get(node_id)
             if node is None:
                 continue
@@ -207,10 +292,12 @@ class GraphCanvas:
                 outline  = C_OTHER_BDR
                 lw       = 2.0
             elif node.is_mutated:
+                drift = getattr(node, 'drift', 0)
+                t     = min(1.0, drift / 20.0)
                 r        = NODE_R
-                fill     = C_NODE_MUTATED
-                outline  = C_NODE_MUTATED_BDR
-                lw       = 1.8
+                fill     = _lerp_hex(C_NODE_EXP, C_NODE_MUTATED, t)
+                outline  = _lerp_hex(C_NODE_EXP_BDR, C_NODE_MUTATED_BDR, t)
+                lw       = 1.5 + t * 0.3
             elif node.expanded:
                 r        = NODE_R
                 fill     = C_NODE_EXP
@@ -266,9 +353,10 @@ class GraphCanvas:
         self._hide_tip()
 
     def _node_at(self, mx: int, my: int) -> str | None:
-        """Return node_id if mouse is within a node's hit radius."""
-        for node_id, (x, y) in self._pos.items():
-            if math.hypot(mx - x, my - y) <= NODE_R + 6:
+        """Return node_id if mouse is within a node's hit radius (screen space)."""
+        for node_id, (wx, wy) in self._pos.items():
+            sx, sy = self._to_screen(wx, wy)
+            if math.hypot(mx - sx, my - sy) <= NODE_R + 6:
                 return node_id
         return None
 

@@ -67,6 +67,9 @@ _NAV_VERBS = {
     "towards", "reach",
 }
 
+# Matches an "items: key, coat, mug" line anywhere in a paragraph
+_ITEMS_RE = re.compile(r'^\s*items\s*:\s*(.+)$', re.I)
+
 
 def _is_exit_sentence(sentence: str) -> bool:
     """Return True if the sentence reads like a navigation/action choice."""
@@ -139,6 +142,17 @@ def parse_world_text(text: str) -> dict:
     for para in paragraphs:
         lines = para.splitlines()
 
+        # Extract and strip any "items: key, coat" lines before further processing
+        para_items: list[str] = []
+        filtered: list[str] = []
+        for ln in lines:
+            m = _ITEMS_RE.match(ln)
+            if m:
+                para_items = [i.strip() for i in m.group(1).split(',') if i.strip()]
+            else:
+                filtered.append(ln)
+        lines = filtered
+
         # Detect optional title line: first line has no sentence-ending punctuation
         if len(lines) > 1 and not re.search(r"[.!?]\s*$", lines[0]):
             title_raw = lines[0].strip()
@@ -182,6 +196,7 @@ def parse_world_text(text: str) -> dict:
             "title":          title,
             "body":           body_text,
             "exit_sentences": exit_sentences,
+            "items":          para_items,
         })
 
     # Deduplicate node IDs (append _2, _3, … if collision)
@@ -216,6 +231,7 @@ def parse_world_text(text: str) -> dict:
             "description": stub["body"],
             "tags":        _extract_tags(stub["body"]),
             "exits":       exits,
+            "items":       stub.get("items", []),
         })
 
     return {

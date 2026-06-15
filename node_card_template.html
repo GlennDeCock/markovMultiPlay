@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Node Card Template</title>
+<style>
+@page { size: A4; margin: 12mm; }
+body { margin: 0; font-family: "Courier New", Courier, monospace; color: #0f0f0c; background: #ffffff; }
+.container { padding: 12mm; }
+.page { box-sizing: border-box; width: 100%; height: 287mm; page-break-after: always; }
+.card { border: 1px solid #111; padding: 12mm; height: 100%; display: flex; flex-direction: column; }
+.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+.h1 { font-size:18px; font-weight:bold; }
+.field { margin-bottom:10px; }
+.label { font-size:11px; color:#111; margin-bottom:4px; }
+.small-line { height:1.3em; border-bottom:1px dashed #999; display:block; }
+.lines { flex:1; background-image: linear-gradient(transparent calc(100% - 1px), #e5e5e5 1px); background-size: 100% 1.2em; padding:8px 6px; }
+.exit-row { display:flex; gap:10px; margin-bottom:6px; }
+.exit-label { width: 65%; }
+.exit-to { width: 35%; }
+.checkbox { display:inline-block; width:12px; height:12px; border:1px solid #000; vertical-align:middle; margin-right:6px; }
+.note-lines { height:48px; background-image: linear-gradient(transparent calc(100% - 1px), #e5e5e5 1px); background-size: 100% 1.2em; padding:6px; }
+.footer { margin-top:10px; display:flex; gap:12px; align-items:center; justify-content:space-between; }
+.small-muted { font-size:10px; color:#444; }
+</style>
+</head>
+<body>
+<div class="container">
+  <!-- Single blank card page. Print this or duplicate with the generator script. -->
+  <div class="page">
+    <div class="card">
+      <div class="header">
+        <div class="h1">Node Card</div>
+        <div class="small-muted">Card #: ________</div>
+      </div>
+
+      <div class="field">
+        <div class="label">Node ID</div>
+        <div class="small-line"></div>
+      </div>
+
+      <div class="field">
+        <div class="label">Title</div>
+        <div class="small-line"></div>
+      </div>
+
+      <div class="field" style="flex:0 0 36%;">
+        <div class="label">Description / Text</div>
+        <div class="lines"></div>
+      </div>
+
+      <div class="field" style="flex:0 0 auto;">
+        <div class="label">Exits (label → target node)</div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+        <div class="exit-row"><div class="exit-label"><div class="small-line"></div></div><div class="exit-to"><div class="small-line"></div></div></div>
+      </div>
+
+      <div class="footer">
+        <div><span class="checkbox"></span> Start node</div>
+        <div><span class="checkbox"></span> Mutated</div>
+        <div>Drift: ______ visits</div>
+      </div>
+
+      <div class="field" style="margin-top:8px;">
+        <div class="label">Tags (comma-separated)</div>
+        <div class="small-line"></div>
+      </div>
+
+      <div class="field" style="margin-top:6px;">
+        <div class="label">Notes</div>
+        <div class="note-lines"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+</body>
+</html>
