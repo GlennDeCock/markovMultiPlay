@@ -38,6 +38,8 @@ TEXT_Y  = SEP1_Y + 9                 # ~20% more gap
 TRACE_H = 28
 MAX_CHOICES   = 2
 CHOICE_D      = 200                   # grid_size=100 at zoom=2 → 200px diameter
+CHOICE_GRID   = 100
+CHOICE_ZOOM   = 2
 CHOICE_R      = CHOICE_D // 2
 CHOICE_LX     = PW // 4
 CHOICE_RX     = 3 * PW // 4
@@ -106,6 +108,8 @@ class PlayerWindow:
         bfont = tkfont.Font(family="Courier", size=8)
         self._choice_buttons: list = []
         self._choice_photos:  list = []
+        self._choice_labels:  list = ["", ""]
+        self._last_scene_node: str | None = None
         for i, cx_pos in enumerate([CHOICE_LX, CHOICE_RX]):
             x0 = cx_pos - CHOICE_R
             y0 = CHOICE_Y_CTR - CHOICE_R
@@ -113,7 +117,7 @@ class PlayerWindow:
                            bg=PAPER, highlightthickness=0, bd=0,
                            cursor="hand2")
             cv.place(x=x0, y=y0)
-            photo = generate_choice_image("", grid_size=200, zoom=1, ink=INK, paper=PAPER)
+            photo = generate_choice_image("", grid_size=CHOICE_GRID, zoom=CHOICE_ZOOM, ink=INK, paper=PAPER)
             self._choice_photos.append(photo)
             img_id = cv.create_image(0, 0, image=photo, anchor="nw")
             txt_id = cv.create_text(
@@ -165,70 +169,98 @@ class PlayerWindow:
         node  = self.engine.active_graph.nodes.get(state.current_node)
         links = state.current_links
 
-        # Main text: always show node's drifted current_text
-        node_text = self.engine.get_display_text(state.current_node)
+        node_text = self.engine.get_display_text_for_player(self.player_id)
         if not node_text and node:
             node_text = node.text
 
-        self._lbl_node.configure(text=state.current_node)
-
-        # Encounter: show the encounter text, hide choices, skip trace
         if state.status == STATUS_ENCOUNTER:
-            self._set_text(state.encounter_text or "")
-            # keep current scene image — no regeneration
-            self._lbl_trace.configure(text="")
-            self._btn_restart.place_forget()
-            for cv, *_ in self._choice_buttons:
-                cv.place_forget()
+            self._apply_screen(
+                node_id=state.current_node,
+                body_text=state.encounter_text or "",
+                trace="",
+                display=[],
+                game_over=False,
+                scene_photo=None,
+                choice_photos=None,
+            )
             return
 
-        self._set_text(node_text)
-        self._update_image(node_text)
+        trace = self.engine.get_player_trace_text(self.player_id)
 
-        # Trace line — shows carried item when player has inventory.
-        # Drift/edits now live in the node text itself, so we no longer echo
-        # a separate trace fragment here.
-        if getattr(state, "inventory", None):
-            self._lbl_trace.configure(text=f"[carrying: {state.inventory_label}]")
-        else:
-            self._lbl_trace.configure(text="")
+        display: list[tuple[str, str]] = []
+        if state.status != STATUS_GAME_OVER:
+            for ch in (links or [])[:MAX_CHOICES]:
+                pfx = "↺  " if getattr(ch, "is_cross", False) else "→  "
+                display.append((pfx, ch.label))
 
-        if state.status == STATUS_GAME_OVER:
+        scene_photo = None
+        if self._last_scene_node != state.current_node:
+            scene_photo = generate_scene_image(node_text, ink=INK, paper=PAPER)
+
+        choice_photos: list[tuple[int, object]] = []
+        for i, (pfx, label) in enumerate(display[:MAX_CHOICES]):
+            if label != self._choice_labels[i]:
+                choice_photos.append((
+                    i,
+                    generate_choice_image(
+                        label, grid_size=CHOICE_GRID, zoom=CHOICE_ZOOM,
+                        ink=INK, paper=PAPER,
+                    ),
+                ))
+
+        self._apply_screen(
+            node_id=state.current_node,
+            body_text=node_text,
+            trace=trace,
+            display=display,
+            game_over=state.status == STATUS_GAME_OVER,
+            scene_photo=scene_photo,
+            choice_photos=choice_photos,
+        )
+        if scene_photo is not None:
+            self._last_scene_node = state.current_node
+
+    def _apply_screen(self, *, node_id, body_text, trace, display,
+                      game_over, scene_photo, choice_photos):
+        """Apply a fully prepared screen in one shot (Pi-style atomic update)."""
+        self._lbl_node.configure(text=node_id)
+        self._set_text(body_text)
+        self._lbl_trace.configure(text=trace)
+
+        if game_over:
             for cv, *_ in self._choice_buttons:
                 cv.place_forget()
             self._btn_restart.place(x=0, y=SEP2_Y + 2,
                                     width=PW, height=PH - SEP2_Y - 10)
         else:
             self._btn_restart.place_forget()
-            choices = links or []
-            display = []
-            for ch in choices[:MAX_CHOICES]:
-                pfx = "↺  " if getattr(ch, "is_cross", False) else "→  "
-                display.append((pfx, ch.label))
-
             cx_positions = [CHOICE_LX, CHOICE_RX]
             for i, (cv, img_id, txt_id) in enumerate(self._choice_buttons):
                 if i < len(display):
                     pfx, label = display[i]
-                    cx_pos = cx_positions[i]
-                    cv.place(x=cx_pos - CHOICE_R, y=CHOICE_Y_CTR - CHOICE_R)
-                    photo = generate_choice_image(label, grid_size=200, zoom=1, ink=INK, paper=PAPER)
-                    self._choice_photos[i] = photo
-                    cv.itemconfigure(img_id, image=photo)
+                    cv.place(x=cx_positions[i] - CHOICE_R, y=CHOICE_Y_CTR - CHOICE_R)
                     cv.itemconfigure(txt_id, text=pfx + label)
                 else:
                     cv.place_forget()
+
+        if scene_photo is not None:
+            self._photo = scene_photo
+            self._img_label.configure(image=scene_photo)
+
+        if choice_photos:
+            for i, photo in choice_photos:
+                self._choice_photos[i] = photo
+                self._choice_labels[i] = display[i][1]
+                cv, img_id, _ = self._choice_buttons[i]
+                cv.itemconfigure(img_id, image=photo)
+
+        self.win.update_idletasks()
 
     def _set_text(self, text: str):
         self.text_box.configure(state="normal")
         self.text_box.delete("1.0", "end")
         self.text_box.insert("end", text, "center")
         self.text_box.configure(state="disabled")
-
-    def _update_image(self, text: str):
-        photo = generate_scene_image(text, ink=INK, paper=PAPER)
-        self._photo = photo
-        self._img_label.configure(image=photo)
 
     # ------------------------------------------------------------------
     # Interactions
@@ -241,7 +273,6 @@ class PlayerWindow:
         if state.status == STATUS_ENCOUNTER:
             return  # locked during encounter
         self.engine.make_choice(self.player_id, index)
-        self._refresh_from_state()
         self.on_event(refresh_only=True)
 
     def _on_restart(self):

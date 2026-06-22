@@ -21,7 +21,7 @@ The latent list is stored on StoryEngine._latent_nodes for on-demand discovery.
 
 import re
 import random
-from collections import Counter
+from collections import Counter, deque
 
 # ---------------------------------------------------------------------------
 # Stopwords
@@ -305,6 +305,62 @@ def build_connected_graph(location_ids: list[str]) -> dict[str, list[str]]:
     return adj
 
 
+def bfs_distances(source: str, adj: dict[str, list[str]]) -> dict[str, int]:
+    """Shortest-hop distances from source to all reachable nodes."""
+    dist = {source: 0}
+    q = deque([source])
+    while q:
+        n = q.popleft()
+        for nb in adj.get(n, []):
+            if nb not in dist:
+                dist[nb] = dist[n] + 1
+                q.append(nb)
+    return dist
+
+
+def min_graph_distance(node_id: str, targets: set[str], adj: dict[str, list[str]]) -> int:
+    """Minimum BFS distance from node_id to any node in targets."""
+    if not targets:
+        return 999
+    if node_id in targets:
+        return 0
+    best = 999
+    for t in targets:
+        d = bfs_distances(t, adj).get(node_id, 999)
+        if d < best:
+            best = d
+    return best
+
+
+def select_spread_start_nodes(
+    node_ids: list[str],
+    adj: dict[str, list[str]],
+    k: int = 20,
+) -> list[str]:
+    """Farthest-point sampling — pick spawn nodes maximally spread on the graph."""
+    if not node_ids:
+        return []
+    k = min(k, len(node_ids))
+    first = max(node_ids, key=lambda nid: len(adj.get(nid, [])))
+    selected = [first]
+    selected_set = {first}
+    while len(selected) < k:
+        best_node = None
+        best_score = -1
+        for cand in node_ids:
+            if cand in selected_set:
+                continue
+            score = min_graph_distance(cand, selected_set, adj)
+            if score > best_score:
+                best_score = score
+                best_node = cand
+        if best_node is None:
+            break
+        selected.append(best_node)
+        selected_set.add(best_node)
+    return selected
+
+
 # ---------------------------------------------------------------------------
 # Text generation helpers
 # ---------------------------------------------------------------------------
@@ -401,7 +457,13 @@ def assign_items(
     Items are reused (cycled) so roughly half of all nodes get an item.
     Returns {node_id: [item_id, ...]}
     """
+    from world_sanity import is_carryable
+
     if not item_candidates or not location_ids:
+        return {}
+
+    item_candidates = [(i, l) for i, l in item_candidates if is_carryable(i)]
+    if not item_candidates:
         return {}
 
     result: dict[str, list[str]] = {}
@@ -415,6 +477,8 @@ def assign_items(
     for idx in range(target):
         node_id = candidate_nodes[idx]
         item_id = item_ids[idx % len(item_ids)]
+        if not is_carryable(item_id):
+            continue
         result[node_id] = [item_id]
 
     return result
@@ -496,7 +560,9 @@ def generate_world(
         })
 
     world_dict = {
-        "start_nodes": list(main_ids),
+        "start_nodes": select_spread_start_nodes(
+            main_ids, adj, k=min(20, len(main_ids))
+        ),
         "nodes": nodes,
     }
 

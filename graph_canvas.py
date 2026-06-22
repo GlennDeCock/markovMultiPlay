@@ -130,10 +130,119 @@ class GraphCanvas:
     # ------------------------------------------------------------------
 
     def _sync_new_nodes(self):
-        for node_id in self.engine.active_graph.nodes:
-            if node_id not in self._pos:
-                cx, cy = self._initial_pos(node_id)
-                self._pos[node_id] = [cx, cy]
+        graph = self.engine.active_graph
+        node_ids = list(graph.nodes.keys())
+        missing = [nid for nid in node_ids if nid not in self._pos]
+        if not missing:
+            return
+
+        if (self.engine._is_world_mode
+                and len(node_ids) >= 3
+                and len(self._pos) == 0):
+            self._layout_world_intertwined(node_ids)
+            return
+
+        for node_id in missing:
+            cx, cy = self._initial_pos(node_id)
+            self._pos[node_id] = [cx, cy]
+
+    def _layout_world_intertwined(self, node_ids: list[str]):
+        """Force-directed layout — scattered start, springs on edges, links cross naturally."""
+        from collections import deque
+
+        graph = self.engine.active_graph
+        if not node_ids:
+            return
+
+        adj: dict[str, list[str]] = {nid: [] for nid in node_ids}
+        edge_pairs: list[tuple[str, str, bool]] = []
+        seen_edges: set[tuple[str, str]] = set()
+        for link in graph.links.values():
+            a, b = link.from_node, link.to_node
+            if a not in adj or b not in adj:
+                continue
+            key = (min(a, b), max(a, b))
+            if key in seen_edges:
+                continue
+            seen_edges.add(key)
+            if b not in adj[a]:
+                adj[a].append(b)
+            if a not in adj[b]:
+                adj[b].append(a)
+            is_cross = bool(getattr(link, "is_cross", False))
+            edge_pairs.append((a, b, is_cross))
+
+        # BFS tree edges — non-tree links get longer springs (chords across the map)
+        root = max(node_ids, key=lambda nid: len(adj.get(nid, [])))
+        tree_edges: set[tuple[str, str]] = set()
+        seen = {root}
+        q = deque([root])
+        while q:
+            n = q.popleft()
+            for nb in adj.get(n, []):
+                key = (min(n, nb), max(n, nb))
+                if nb not in seen:
+                    seen.add(nb)
+                    tree_edges.add(key)
+                    q.append(nb)
+
+        n = len(node_ids)
+        cx = self.width / 2
+        cy = self.height / 2
+        radius = max(100, 22 * math.sqrt(n))
+
+        order = list(node_ids)
+        random.shuffle(order)
+        pos: dict[str, list[float]] = {}
+        for i, nid in enumerate(order):
+            angle = 2 * math.pi * i / n + random.uniform(-0.35, 0.35)
+            r = radius * random.uniform(0.55, 1.2)
+            pos[nid] = [cx + r * math.cos(angle), cy + r * math.sin(angle)]
+
+        k_rep = 6500.0
+        k_spring = 0.07
+        rest_short = 52.0
+        rest_long = 105.0
+
+        for step in range(140):
+            damp = 0.12 + 0.88 * (1.0 - step / 140.0)
+            force = {nid: [0.0, 0.0] for nid in node_ids}
+
+            for i, a in enumerate(node_ids):
+                for b in node_ids[i + 1:]:
+                    dx = pos[a][0] - pos[b][0]
+                    dy = pos[a][1] - pos[b][1]
+                    dist = max(1.0, math.hypot(dx, dy))
+                    f = k_rep / (dist * dist)
+                    fx, fy = f * dx / dist, f * dy / dist
+                    force[a][0] += fx
+                    force[a][1] += fy
+                    force[b][0] -= fx
+                    force[b][1] -= fy
+
+            for a, b, is_cross in edge_pairs:
+                dx = pos[b][0] - pos[a][0]
+                dy = pos[b][1] - pos[a][1]
+                dist = max(1.0, math.hypot(dx, dy))
+                key = (min(a, b), max(a, b))
+                if is_cross or key not in tree_edges:
+                    rest = rest_long
+                else:
+                    rest = rest_short
+                f = k_spring * (dist - rest)
+                fx, fy = f * dx / dist, f * dy / dist
+                force[a][0] += fx
+                force[a][1] += fy
+                force[b][0] -= fx
+                force[b][1] -= fy
+
+            for nid in node_ids:
+                force[nid][0] += (cx - pos[nid][0]) * 0.003
+                force[nid][1] += (cy - pos[nid][1]) * 0.003
+                pos[nid][0] += force[nid][0] * damp * 0.35
+                pos[nid][1] += force[nid][1] * damp * 0.35
+
+        self._pos = {nid: [pos[nid][0], pos[nid][1]] for nid in node_ids}
 
     def _initial_pos(self, node_id: str) -> tuple:
         """Place new node near a linked neighbour, or at centre with jitter."""

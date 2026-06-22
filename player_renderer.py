@@ -125,6 +125,7 @@ def render_player_screen(
     trace: str | None,
     status: str,
     node_id: str | None = None,
+    node_title: str | None = None,
     encounter_text: str | None = None,
     use_restart: bool = False,
     screen_w: int = 480,
@@ -163,16 +164,21 @@ def render_player_screen(
 
     # ── Scene text ──────────────────────────────────────────────────
     text_font = _get_font(11 if screen_h > 500 else 9)
+    title_font = _get_font(13 if screen_h > 500 else 11)
     txt_x = L.bezel + L.text_x
     txt_y = L.bezel + L.text_y
     text_area_h = (L.bezel + L.sep2_y) - txt_y - 4
+
+    if node_title:
+        draw.text((txt_x, txt_y), node_title, fill=0, font=title_font)
+        txt_y += title_font.size + 6
 
     wrapped = _wrap_text(scene_text, text_font, L.text_w)
     draw.multiline_text((txt_x, txt_y), wrapped, fill=0,
                         font=text_font, spacing=3)
 
     # ── Node ID (top-right of text zone) ────────────────────────────
-    if node_id:
+    if node_id and not node_title:
         nid_font = _get_font(7)
         nid_text = node_id
         nid_w = int(nid_font.getlength(nid_text))
@@ -221,7 +227,8 @@ def render_player_screen(
 
 
 def render_to_png_bytes(player_id, scene_text, choices, trace,
-                        status, node_id=None, encounter_text=None,
+                        status, node_id=None, node_title=None,
+                        encounter_text=None,
                         screen_w=480, screen_h=800) -> bytes:
     """Render and return PNG bytes."""
     img = render_player_screen(
@@ -231,6 +238,7 @@ def render_to_png_bytes(player_id, scene_text, choices, trace,
         trace=trace,
         status=status,
         node_id=node_id,
+        node_title=node_title,
         encounter_text=encounter_text,
         screen_w=screen_w,
         screen_h=screen_h,

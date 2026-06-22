@@ -26,11 +26,12 @@ POLL_INTERVAL_MS = 50  # how often main thread polls the queue
 
 
 class _Client:
-    __slots__ = ("conn", "addr", "player_id", "screen_w", "screen_h")
+    __slots__ = ("conn", "addr", "player_id", "device_id", "screen_w", "screen_h")
     def __init__(self, conn: socket.socket, addr: tuple):
         self.conn = conn
         self.addr = addr
         self.player_id: str | None = None
+        self.device_id: str | None = None
         self.screen_w = 480
         self.screen_h = 800
 
@@ -45,6 +46,7 @@ class GameServer:
         self.host = host
 
         self._clients: dict[str, _Client] = {}   # player_id → _Client
+        self._device_players: dict[str, str] = {}  # device_id → player_id (all day)
         self._lock = threading.Lock()
         self._server_sock: socket.socket | None = None
         self._running = False
@@ -60,11 +62,18 @@ class GameServer:
         def _on_graph_change(*a, **kw):
             if orig_graph:
                 orig_graph(*a, **kw)
-            self._push_all()
+            if kw.get("canvas_only"):
+                return
+            moved_player = kw.get("moved_player")
+            if moved_player:
+                self.push_state(moved_player)
+            else:
+                self._push_all()
 
         def _on_encounter_start(*a, **kw):
             if orig_encounter:
                 orig_encounter(*a, **kw)
+            # All participants (fled + witness) need a fresh screen
             self._push_all()
 
         self.engine.on_graph_change = _on_graph_change
@@ -176,6 +185,7 @@ class GameServer:
         if msg_type == "hello":
             client.screen_w = msg.get("width", 480)
             client.screen_h = msg.get("height", 800)
+            client.device_id = msg.get("device_id") or f"wall-{client.addr[0]}:{client.addr[1]}"
             self._queue.put(("spawn", client))
 
         elif msg_type == "choice":
@@ -217,15 +227,27 @@ class GameServer:
     # ------------------------------------------------------------------
 
     def _spawn_player(self, client: _Client):
-        if len(self.engine.players) >= MAX_PLAYERS:
-            log.warning("Max players reached, rejecting %s", client.addr)
-            return
-        state = self.engine.spawn_player()
-        pid = state.player_id
+        device_id = client.device_id or f"wall-{client.addr[0]}:{client.addr[1]}"
+
         with self._lock:
-            client.player_id = pid
-            self._clients[pid] = client
-        log.info("Client %s -> player %s", client.addr, pid)
+            pid = self._device_players.get(device_id)
+            if pid and pid in self.engine.players:
+                stale = self._clients.get(pid)
+                if stale is not client:
+                    stale.player_id = None
+                client.player_id = pid
+                self._clients[pid] = client
+            else:
+                if len(self.engine.players) >= MAX_PLAYERS:
+                    log.warning("Max players reached, rejecting %s", client.addr)
+                    return
+                state = self.engine.spawn_player()
+                pid = state.player_id
+                client.player_id = pid
+                self._clients[pid] = client
+                self._device_players[device_id] = pid
+
+        log.info("Device %s -> player %s (%s)", device_id, pid, client.addr)
         self._send_render(client)
 
     def _on_disconnect(self, client: _Client):
@@ -233,9 +255,9 @@ class GameServer:
         if pid is None:
             return
         with self._lock:
-            self._clients.pop(pid, None)
-        self.engine.remove_player(pid)
-        log.info("Player %s disconnected", pid)
+            if self._clients.get(pid) is client:
+                self._clients.pop(pid, None)
+        log.info("Player %s disconnected (wall idle — state kept)", pid)
 
     # ------------------------------------------------------------------
     # Internal: push state to client (any thread, but only called from
@@ -250,18 +272,27 @@ class GameServer:
         if state is None:
             return
         node = self.engine.active_graph.nodes.get(state.current_node)
+        node_title = None
+        if node and self.engine.world:
+            wn = self.engine.world.nodes.get(state.current_node)
+            if wn:
+                node_title = wn.title or state.current_node.replace("_", " ")
 
         if state.status == STATUS_ENCOUNTER:
             scene_text = state.encounter_text or ""
+            if not scene_text.strip():
+                scene_text = "Someone else was here."
+            else:
+                scene_text = f"Someone else was here.\n\n{scene_text}"
             choices = []
             trace = ""
             use_restart = False
         else:
-            scene_text = self.engine.get_display_text(state.current_node)
+            scene_text = self.engine.get_display_text_for_player(pid)
             if not scene_text and node:
                 scene_text = getattr(node, "text", "")
             choices = state.current_links or []
-            trace = self.engine.get_trace(state.current_node) or ""
+            trace = self.engine.get_player_trace_text(pid)
             use_restart = state.status == STATUS_GAME_OVER
 
         try:
@@ -272,6 +303,7 @@ class GameServer:
                 trace=trace,
                 status=state.status,
                 node_id=state.current_node,
+                node_title=node_title,
                 screen_w=client.screen_w,
                 screen_h=client.screen_h,
             )

@@ -198,7 +198,8 @@ def _wait_for_key_stdin() -> int:
             # skip other chars (newline, etc.) and try again
 
 
-def run(host: str, port: int, use_stdin: bool = False):
+def run(host: str, port: int, use_stdin: bool = False,
+        device_id: str | None = None):
     # Find Digispark input (optional)
     dp_path = find_digispark() if not use_stdin else None
     dev = None
@@ -208,6 +209,10 @@ def run(host: str, port: int, use_stdin: bool = False):
         log.info("Digispark found at %s", dp_path)
     else:
         log.warning("No Digispark — will read A/B from terminal (SSH) input")
+
+    if device_id is None:
+        import socket as _socket
+        device_id = _socket.gethostname()
 
     # Initialize e-paper
     log.info("Initializing e-paper display...")
@@ -224,6 +229,7 @@ def run(host: str, port: int, use_stdin: bool = False):
             sock = connect(host, port)
             send_json(sock, {
                 "type": "hello",
+                "device_id": device_id,
                 "width": RENDER_W,
                 "height": RENDER_H,
             })
@@ -296,7 +302,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pi Zero e-paper client")
     parser.add_argument("host", help="Server IP address")
     parser.add_argument("port", nargs="?", type=int, default=9999)
+    parser.add_argument("--device-id", default=None,
+                        help="Wall station ID (default: hostname). Same ID reconnects as same player.")
     parser.add_argument("--stdin", action="store_true",
                         help="Read A/B from terminal (use when no Digispark)")
     args = parser.parse_args()
-    run(args.host, args.port, use_stdin=args.stdin)
+    run(args.host, args.port, use_stdin=args.stdin, device_id=args.device_id)

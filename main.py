@@ -9,6 +9,7 @@ Modes:
 
 import argparse
 import logging
+import sys
 import tkinter as tk
 
 from control_window import ControlWindow
@@ -36,10 +37,10 @@ def main():
         from tkinter import messagebox
         result = messagebox.askyesnocancel(
             title="MultiMarkovPlay — Mode",
-            message="Start in server mode (for Pi Zero terminals)?",
-            detail="Yes  = TCP server mode (Pi Zeros connect to this PC)\n"
-                   "No   = Local mode (Tkinter player windows on this PC)\n"
-                   "Cancel = Exit",
+            message="How will players connect?",
+            detail="Yes     Server mode — Pi Zero / network clients connect to this PC\n"
+                   "No      Local mode — player windows open on this PC\n"
+                   "Cancel  Exit",
         )
         if result is None:
             root.destroy()

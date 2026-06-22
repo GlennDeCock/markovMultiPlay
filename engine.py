@@ -11,10 +11,17 @@ The story graph GROWS as players make choices.
 """
 
 import json
+import queue
 import random
 import re
+import threading
+import time
 from collections import defaultdict
+from copy import deepcopy
 from pathlib import Path
+
+LLM_COALESCE_SEC = 3.0  # batch node polishes before one background API call
+IDLE_SPAWN_SEC = 12 * 60  # gallery mode: force spawn if none for this long
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +406,10 @@ class PlayerState:
         # Inventory — world mode only, max 1 item at a time
         self.inventory: str | None       = None   # item_id of carried item
         self.inventory_label: str | None = None   # display label e.g. "the key"
+        # Per-node exit rotation index (fair exposure when 3+ exits, item slot)
+        self.exit_rotation: dict[str, int] = {}
+        # One-line confirmation after a choice (wall one-press UX)
+        self.choice_beat: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -431,13 +442,15 @@ class InteractionChoice:
 class ItemChoice:
     """Stateful item interaction — take, leave, or use a carried item."""
 
-    def __init__(self, action: str, item_id: str, item_label: str):
+    def __init__(self, action: str, item_id: str, item_label: str,
+                 travel_exit: "ExitLink | None" = None):
         self.choice_type  = "item"
         self.action       = action        # "take" | "leave" | "use"
         self.item_id      = item_id
         self.label        = item_label
         self.is_cross     = False
         self.to_node      = None
+        self.travel_exit  = travel_exit   # exit bundled with this item action
         self.id           = f"item_{action}_{item_id[:12].replace(' ', '_')}"
 
 
@@ -520,7 +533,31 @@ class WorldGraph:
             self.nodes[node.id] = node
         if not self.start_nodes and self.nodes:
             self.start_nodes = [next(iter(self.nodes))]
+
+        all_ids = list(self.nodes.keys())
+        adj = self._build_adjacency()
+        from world_generator import select_spread_start_nodes
+        # Always spread spawn points across the full graph — authored start_nodes
+        # that cover only a subset (e.g. nodes.json's 3 of 6) cluster players.
+        if all_ids:
+            self.start_nodes = select_spread_start_nodes(
+                all_ids, adj, k=min(20, len(all_ids))
+            )
         return self
+
+    def _build_adjacency(self) -> dict[str, list[str]]:
+        """Undirected adjacency from world exit links."""
+        adj = {nid: [] for nid in self.nodes}
+        for node in self.nodes.values():
+            for ex in node.exits:
+                dest = ex.to_node
+                if dest not in self.nodes:
+                    continue
+                if dest not in adj[node.id]:
+                    adj[node.id].append(dest)
+                if node.id not in adj[dest]:
+                    adj[dest].append(node.id)
+        return adj
 
     def pregenerate(self, engine) -> "WorldGraph":
         """Pre-generate all interaction choices for every node using Markov."""
@@ -534,6 +571,9 @@ class WorldGraph:
 # ---------------------------------------------------------------------------
 # Story Engine
 # ---------------------------------------------------------------------------
+
+DISPLAY_TEXT_MAX_PARAS = 2
+
 
 class StoryEngine:
     def __init__(self, training_dir: Path):
@@ -553,22 +593,65 @@ class StoryEngine:
         self.max_interactions_per_node      = 3
         self._start_node_index: int         = 0   # round-robin spawn counter
         self._drift_rate: int               = 1   # visits per sentence rewrite (1=every)
+        self._world_adj: dict[str, list[str]] | None = None
+        self._spawn_order: list[str]        = []
 
         # Callbacks — UI registers these to be notified of graph changes
-        self.on_graph_change    = None   # callable()
+        self.on_graph_change    = None   # callable(moved_player: str | None = None)
         self.on_encounter_start = None   # callable(node_id: str)
 
-        # Latent node pool for corpus-generated worlds (on-demand discovery)
+        # On-demand world growth (always on in world mode)
         self._latent_nodes: list = []
-        # Infinite mode — keeps generating new nodes from the corpus
-        self._infinite_mode: bool      = False
         self._corpus_text: str         = ""
         self._corpus_locations: list   = []
         self._corpus_items: list       = []
         self._fresh_node_counter: int  = 0
 
+        # Spawn new nodes after N live node text changes (drift / items)
+        self.spawn_every_node_changes: int = 5
+        self.gallery_pace: bool = True
+        self.max_world_nodes: int = 300
+        self._node_changes_since_spawn: int = 0
+        self._last_spawn_time: float = time.time()
+        self._play_changed_nodes: dict[str, list[str]] = {}
+        self._recent_item_events: list[str] = []
+
+        # Session log (player actions, drift, items, LLM, discovery)
+        from world_log import WorldLog
+        self.world_log = WorldLog()
+        self._last_review_had_changes: bool = False
+
+        # LLM world review (off / openai / ollama) — play-time calls run in background
+        self.llm_mode: str = "off"
+        self.llm_model: str | None = None
+        self.llm_ollama_url: str = "http://localhost:11434"
+        self.on_world_progress = None  # callable(str) for UI status
+        self.on_schedule_main = None   # callable(fn) — marshal results onto UI thread
+
+        self._llm_job_queue: queue.Queue = queue.Queue()
+        self._llm_pending: dict[str, dict] = {}  # node_id → {dict, reasons}
+        self._llm_lock = threading.Lock()
+        self._llm_timer: threading.Timer | None = None
+        self._llm_worker = threading.Thread(
+            target=self._llm_worker_loop, name="llm-worker", daemon=True,
+        )
+        self._llm_worker.start()
+
         self._init_start_node()
         self.train()
+
+    def _emit_graph_change(
+        self, moved_player: str | None = None, canvas_only: bool = False,
+    ):
+        if self.on_graph_change:
+            self.on_graph_change(moved_player=moved_player, canvas_only=canvas_only)
+
+    def _schedule_main(self, fn):
+        """Run fn on the UI thread (via control_window root.after)."""
+        if self.on_schedule_main:
+            self.on_schedule_main(fn)
+        else:
+            fn()
 
     # ------------------------------------------------------------------
     # Setup
@@ -611,11 +694,90 @@ class StoryEngine:
         """Load a static authored world from a JSON file and pre-generate choices."""
         self.world = WorldGraph().load(Path(path))
         self._world_at_node = defaultdict(set)
+        self._start_node_index = 0
+        self._world_adj = self.world._build_adjacency()
+        self._spawn_order = self._compute_spawn_order()
         if self.markov.chain:          # only pregenerate if training data is loaded
             self.world.pregenerate(self)
+        self._ensure_discovery_pool()
+        self._play_changed_nodes.clear()
+        self._node_changes_since_spawn = 0
+        self._last_spawn_time = time.time()
+        self._cancel_llm_coalesce_timer()
+        with self._llm_lock:
+            self._llm_pending.clear()
         if self.on_graph_change:
             self.on_graph_change()
         return self
+
+    def _ensure_discovery_pool(self):
+        """Seed location corpus for on-demand node generation (cached JSON loads)."""
+        if not self.world:
+            return
+        if not self._corpus_locations:
+            self._corpus_locations = [
+                n.title for n in self.world.nodes.values() if n.title
+            ]
+        self.world_log.add(
+            "world",
+            f"loaded {len(self.world.nodes)} nodes, "
+            f"{len(self._latent_nodes)} latent pool, "
+            f"spawn every {self.spawn_every_node_changes} node changes",
+        )
+
+    def _compute_spawn_order(self) -> list[str]:
+        """Spread-ordered spawn candidates for the loaded world graph."""
+        if not self.world:
+            return []
+        from world_generator import select_spread_start_nodes
+        pool = list(self.world.nodes.keys())
+        if not pool:
+            return []
+        adj = self._world_adj or self.world._build_adjacency()
+        return select_spread_start_nodes(pool, adj, k=min(20, len(pool)))
+
+    def _pick_world_spawn_node(self) -> str:
+        """Pick a spawn node maximally distant from players already in the world."""
+        pool = list(self.world.nodes.keys())
+        if not pool:
+            return next(iter(self.world.nodes))
+
+        adj = self._world_adj or self.world._build_adjacency()
+        occupied = {nid for nid, pids in self._world_at_node.items() if pids}
+
+        from world_generator import bfs_distances, min_graph_distance
+
+        if not occupied:
+            def eccentricity(nid: str) -> int:
+                dists = bfs_distances(nid, adj)
+                return max(dists.values()) if dists else 0
+
+            start_id = max(pool, key=eccentricity)
+            self._start_node_index += 1
+            return start_id
+
+        best_score = -1
+        best_nodes: list[str] = []
+        for cand in pool:
+            if cand in occupied:
+                continue
+            score = min_graph_distance(cand, occupied, adj)
+            if score > best_score:
+                best_score = score
+                best_nodes = [cand]
+            elif score == best_score:
+                best_nodes.append(cand)
+
+        if not best_nodes:
+            start_id = pool[self._start_node_index % len(pool)]
+            self._start_node_index += 1
+            return start_id
+
+        order_rank = {nid: i for i, nid in enumerate(self._spawn_order)}
+        best_nodes.sort(key=lambda n: order_rank.get(n, 999))
+        start_id = best_nodes[self._start_node_index % len(best_nodes)]
+        self._start_node_index += 1
+        return start_id
 
     def load_from_text(self, txt_path) -> tuple:
         """Load a world from a .txt file.
@@ -639,6 +801,7 @@ class StoryEngine:
             self._world_at_node = defaultdict(set)
             self.players = {}
             self._start_node_index = 0
+            self._apply_world_quality(json_path)
             self.load_world(json_path)
             node_count = len(self.world.nodes) if self.world else 0
             return json_path, node_count
@@ -674,11 +837,35 @@ class StoryEngine:
             src_text, self.markov, node_count=node_count
         )
 
+        self._report_progress("Sanity check…")
+        from world_sanity import sanitize_world, sanitize_node_dict
+        from world_log import diff_node_dicts
+        before_gen = deepcopy(world_dict)
+        world_dict = sanitize_world(world_dict)
+        sanity_changes = diff_node_dicts(before_gen.get("nodes", []), world_dict.get("nodes", []))
+        if sanity_changes:
+            self.world_log.add_block("sanity", f"{len(sanity_changes)} rule fix(es)", sanity_changes)
+        latent_nodes = [sanitize_node_dict(n) for n in latent_nodes]
+
+        client = self._get_llm_client()
+        llm_changes: list[str] = []
+        if client.enabled:
+            before_llm = deepcopy(world_dict)
+            world_dict, llm_changes = client.review_world(
+                world_dict, on_progress=self._report_progress,
+            )
+            if not llm_changes:
+                llm_changes = diff_node_dicts(
+                    before_llm.get("nodes", []), world_dict.get("nodes", []),
+                )
+            if llm_changes:
+                self.world_log.add_block("llm", f"{len(llm_changes)} AI edit(s) on rebuild", llm_changes)
+        self._last_review_had_changes = bool(sanity_changes or llm_changes)
+
         # Keep corpus pools for infinite, on-demand node generation
         self._corpus_text      = src_text
         self._corpus_locations = extract_locations(src_text, n=node_count + 40)
         self._corpus_items     = extract_items(src_text, self._corpus_locations)
-        self._infinite_mode    = True
 
         # Write generated JSON as a sidecar file
         json_path = txt_path.parent / (txt_path.stem + "_generated.json")
@@ -692,18 +879,53 @@ class StoryEngine:
         self._world_at_node = defaultdict(set)
         self.players = {}
         self._start_node_index = 0
-        self._latent_nodes: list = latent_nodes   # pool for discovery
+        self._latent_nodes: list = latent_nodes
+        self._play_changed_nodes.clear()
+        self._node_changes_since_spawn = 0
         self.load_world(json_path)
 
         node_count_actual = len(self.world.nodes) if self.world else 0
         return json_path, node_count_actual
 
+    def _apply_world_quality(self, json_path) -> None:
+        """Run sanity (+ optional LLM) on an on-disk world JSON before load."""
+        import json as _json
+        from world_sanity import sanitize_world
+
+        path = Path(json_path)
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        self._report_progress("Sanity check…")
+        before = deepcopy(data)
+        data = sanitize_world(data)
+        from world_log import diff_node_dicts
+        sanity_changes = diff_node_dicts(before.get("nodes", []), data.get("nodes", []))
+        if sanity_changes:
+            self.world_log.add_block("sanity", f"{len(sanity_changes)} rule fix(es)", sanity_changes)
+
+        client = self._get_llm_client()
+        llm_changes: list[str] = []
+        if client.enabled:
+            before_llm = deepcopy(data)
+            data, llm_changes = client.review_world(
+                data, on_progress=self._report_progress,
+            )
+            if not llm_changes:
+                from world_log import diff_node_dicts
+                llm_changes = diff_node_dicts(
+                    before_llm.get("nodes", []), data.get("nodes", []),
+                )
+        self._last_review_had_changes = bool(sanity_changes or llm_changes)
+        if llm_changes:
+            self.world_log.add_block("llm", f"{len(llm_changes)} AI edit(s)", llm_changes)
+        elif client.enabled:
+            self.world_log.add("llm", "review complete — no changes")
+        path.write_text(
+            _json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def _world_spawn_player(self, player_id: str) -> "PlayerState":
-        start_nodes = self.world.start_nodes
-        if not start_nodes:
-            start_nodes = list(self.world.nodes.keys())
-        start_id = start_nodes[self._start_node_index % len(start_nodes)]
-        self._start_node_index += 1
+        start_id = self._pick_world_spawn_node()
         if start_id not in self.world.nodes:
             start_id = next(iter(self.world.nodes))
         self.world.nodes[start_id].visitors.add(player_id)
@@ -712,8 +934,7 @@ class StoryEngine:
         self._world_at_node[start_id].add(player_id)
         # No encounter on spawn — give normal choices regardless of occupants
         self._build_world_choices(player_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._emit_graph_change(moved_player=player_id)
         return state
 
     def _world_reset_player(self, player_id: str) -> "PlayerState":
@@ -724,14 +945,258 @@ class StoryEngine:
         return self._world_spawn_player(player_id)
 
     def _refresh_choices_for_world_player(self, player_id: str):
-        """Show up to 2 randomly-sampled exits — different pair each visit."""
+        """Show up to 2 ranked exits — best navigation pair for this visit."""
         state = self.players[player_id]
         node  = self.world.nodes[state.current_node]
         exits = [e for e in node.exits if e.to_node != state.current_node]
         if not exits:
-            exits = list(node.exits)   # fallback: all exits (incl. self-loops)
-        random.shuffle(exits)
-        state.current_links = exits[:2]
+            exits = list(node.exits)
+        ranked = self._rank_exits_for_player(player_id, state.current_node, exits)
+        state.current_links = [
+            self._exit_for_display(ex) for ex in ranked[:2]
+        ]
+
+    def _title_words_in_label(self, title: str, label: str) -> bool:
+        label_lower = label.lower()
+        if title.replace("_", " ").lower() in label_lower:
+            return True
+        for w in title.split():
+            if len(w) > 2 and w.lower() in label_lower:
+                return True
+        return False
+
+    def _exit_navigation_score(
+        self, player_id: str, from_node_id: str, exit: "ExitLink",
+    ) -> tuple[int, int]:
+        """Score an exit for sorting (higher = prefer showing first)."""
+        state = self.players[player_id]
+        hist = state.history
+        dest = exit.to_node
+        score = 0
+
+        if dest not in hist:
+            score += 3
+
+        dest_node = self.world.nodes.get(dest) if self.world else None
+        dest_title = dest_node.title if dest_node else dest.replace("_", " ")
+        if self._title_words_in_label(dest_title, exit.label):
+            score += 2
+
+        came_from = None
+        if len(hist) >= 2 and hist[-1] == from_node_id:
+            came_from = hist[-2]
+
+        if exit.label.strip().lower() == "return":
+            score -= 2
+        if came_from and dest == came_from:
+            score -= 2
+
+        recent = set(hist[-3:]) if len(hist) >= 3 else set(hist)
+        if dest in recent and dest != from_node_id:
+            score -= 1
+
+        tie = hash((player_id, from_node_id, exit.to_node)) & 0xFFFF
+        return score, tie
+
+    def _rank_exits_for_player(
+        self, player_id: str, from_node_id: str, exits: list,
+    ) -> list:
+        """History-aware exit order; rotates among ties on revisits."""
+        if not exits:
+            return exits
+        state = self.players[player_id]
+        scored = [
+            (self._exit_navigation_score(player_id, from_node_id, ex), ex)
+            for ex in exits
+        ]
+        scored.sort(key=lambda pair: (-pair[0][0], pair[0][1]))
+        ranked = [ex for _, ex in scored]
+        rot = state.exit_rotation.get(from_node_id, 0)
+        if len(ranked) > 1 and rot:
+            offset = rot % len(ranked)
+            ranked = ranked[offset:] + ranked[:offset]
+        return ranked
+
+    def _display_exit_label(self, exit: "ExitLink") -> str:
+        """Ensure the destination title is readable on the choice button."""
+        if not self.world:
+            return exit.label
+        dest = self.world.nodes.get(exit.to_node)
+        if not dest:
+            return exit.label
+        title = dest.title or exit.to_node.replace("_", " ")
+        if self._title_words_in_label(title, exit.label):
+            return exit.label
+        return f"Go to {title}"
+
+    def _exit_for_display(self, exit: "ExitLink") -> "ExitLink":
+        label = self._display_exit_label(exit)
+        if label == exit.label:
+            return exit
+        return ExitLink(exit.from_node, exit.to_node, label)
+
+    def _choice_for_display(self, choice):
+        """Apply display-only exit labels without mutating the world graph."""
+        if getattr(choice, "choice_type", None) == "exit":
+            return self._exit_for_display(choice)
+        if getattr(choice, "choice_type", None) == "item":
+            travel = getattr(choice, "travel_exit", None)
+            if travel is not None:
+                return ItemChoice(
+                    choice.action, choice.item_id, choice.label,
+                    travel_exit=self._exit_for_display(travel),
+                )
+        return choice
+
+    def get_player_trace_text(self, player_id: str) -> str:
+        """Trace strip: inventory or breadcrumb from previous location."""
+        state = self.players.get(player_id)
+        if not state:
+            return ""
+        if state.inventory:
+            label = state.inventory_label or state.inventory
+            return f"[carrying: {label}]"
+        if self.world and len(state.history) >= 2:
+            prev_id = state.history[-2]
+            prev = self.world.nodes.get(prev_id)
+            title = prev.title if prev else prev_id.replace("_", " ")
+            return f"from: {title}"
+        node_trace = self.get_trace(state.current_node)
+        return node_trace or ""
+
+    def _effective_spawn_every(self) -> int:
+        """Gallery pace lowers threshold as more players join."""
+        if not self.gallery_pace:
+            return self.spawn_every_node_changes
+        n = max(1, len(self.players))
+        return max(3, self.spawn_every_node_changes - (n - 1))
+
+    def _effective_drift_rate(self) -> int:
+        """Gallery pace: faster drift when 4+ players and slider is above 1."""
+        if self.gallery_pace and len(self.players) >= 4 and self._drift_rate > 1:
+            return 1
+        return self._drift_rate
+
+    def gallery_idle_seconds_remaining(self) -> int:
+        """Seconds until an idle gallery spawn may fire."""
+        if not self.gallery_pace:
+            return IDLE_SPAWN_SEC
+        elapsed = time.time() - self._last_spawn_time
+        return max(0, int(IDLE_SPAWN_SEC - elapsed))
+
+    def tick_gallery_idle(self) -> int:
+        """Periodic check for idle gallery spawn (call from UI timer)."""
+        return self._maybe_gallery_idle_spawn()
+
+    def _maybe_gallery_idle_spawn(self) -> int:
+        if not self.gallery_pace or not self.world or not self.players:
+            return 0
+        if time.time() - self._last_spawn_time < IDLE_SPAWN_SEC:
+            return 0
+        occupied = [
+            p.current_node for p in self.players.values()
+            if p.current_node in self.world.nodes
+        ]
+        if not occupied:
+            return 0
+        from_node = random.choice(occupied)
+        self.world_log.add("spawn", "idle gallery spawn")
+        return self._spawn_from_play(from_node_id=from_node)
+
+    def _title_mentioned_in_text(self, title: str, body: str) -> bool:
+        body_lower = body.lower()
+        for w in title.split():
+            if len(w) > 2 and w.lower() in body_lower:
+                return True
+        return title.replace("_", " ").lower() in body_lower
+
+    def _neighbor_titles_for_node(self, node_id: str) -> list[str]:
+        if not self.world or node_id not in self.world.nodes:
+            return []
+        titles: list[str] = []
+        for ex in self.world.nodes[node_id].exits:
+            if ex.to_node == node_id:
+                continue
+            dest = self.world.nodes.get(ex.to_node)
+            titles.append(dest.title if dest else ex.to_node.replace("_", " "))
+        return titles
+
+    def _visible_destination_titles(self, player_id: str) -> list[str]:
+        """Destination titles matching the player's current choice buttons."""
+        state = self.players.get(player_id)
+        if not state or not self.world:
+            return []
+        titles: list[str] = []
+        seen: set[str] = set()
+        for c in state.current_links[:2]:
+            dest_id = None
+            if getattr(c, "choice_type", None) == "exit":
+                dest_id = c.to_node
+            elif getattr(c, "choice_type", None) == "item":
+                travel = getattr(c, "travel_exit", None)
+                if travel is not None:
+                    dest_id = travel.to_node
+            if not dest_id or dest_id in seen:
+                continue
+            seen.add(dest_id)
+            dest = self.world.nodes.get(dest_id)
+            titles.append(dest.title if dest else dest_id.replace("_", " "))
+        if titles:
+            return titles[:2]
+        node_id = state.current_node
+        exits = [
+            e for e in self.world.nodes[node_id].exits
+            if e.to_node != node_id
+        ]
+        if not exits:
+            exits = list(self.world.nodes[node_id].exits)
+        ranked = self._rank_exits_for_player(player_id, node_id, exits)
+        for ex in ranked[:2]:
+            dest = self.world.nodes.get(ex.to_node)
+            titles.append(dest.title if dest else ex.to_node.replace("_", " "))
+        return titles[:2]
+
+    def get_orientation_hint(self, player_id: str) -> str | None:
+        """One-line display hint naming where current choices lead."""
+        state = self.players.get(player_id)
+        if not state or not self.world:
+            return None
+        node = self.world.nodes.get(state.current_node)
+        if not node:
+            return None
+        dest_titles = self._visible_destination_titles(player_id)
+        if not dest_titles:
+            return None
+        body = node.current_text
+        if all(self._title_mentioned_in_text(t, body) for t in dest_titles):
+            return None
+        if len(dest_titles) == 1:
+            return f"Paths: {dest_titles[0]}."
+        return f"Paths: {dest_titles[0]} · {dest_titles[1]}."
+
+    def get_display_text_for_player(self, player_id: str) -> str:
+        """Node body plus optional beat line and orientation hint (display-only)."""
+        state = self.players.get(player_id)
+        if not state:
+            return ""
+        base = self.get_display_text(state.current_node)
+        parts = base.split("\n\n")
+        if len(parts) > DISPLAY_TEXT_MAX_PARAS:
+            base = "\n\n".join(parts[:DISPLAY_TEXT_MAX_PARAS])
+
+        if state.choice_beat:
+            beat = state.choice_beat
+            state.choice_beat = None
+            body = f"{beat}\n\n{base.rstrip()}"
+        else:
+            body = base.rstrip()
+
+        if not self.world:
+            return body
+        hint = self.get_orientation_hint(player_id)
+        if hint:
+            return f"{body}\n\n{hint}"
+        return body
 
     def _build_world_choices(self, player_id: str):
         """Build exactly 2 choices for a world-mode player.
@@ -749,7 +1214,7 @@ class StoryEngine:
 
         # Take choices — for each item currently present in this node
         for item_id, info in node.items.items():
-            if info["present"]:
+            if info["present"] and state.inventory is None:
                 item_pool.append(ItemChoice("take", item_id, f"Take {info['label']}"))
 
         # Inventory choice — player is carrying something
@@ -765,47 +1230,542 @@ class StoryEngine:
             if inv_words & node_words:
                 action, label = "use",   f"Use {inv_label} here"
             else:
-                action, label = "leave", f"Leave {inv_label} here"
+                action, label = "leave", f"Drop {inv_label} and go"
             item_pool.append(ItemChoice(action, inv_id, label))
 
         # Exit choices (exclude exact self-loops unless no other exits exist)
         exits = [e for e in node.exits if e.to_node != state.current_node]
         if not exits:
             exits = list(node.exits)
-        random.shuffle(exits)
+        ranked = self._rank_exits_for_player(player_id, state.current_node, exits)
 
-        # Selection: always 2 — prefer 1 item + 1 exit when both are available
+        # Selection: always 2 — prefer 1 item + 1 exit when both are available.
         chosen: list = []
-        if item_pool:
+        if item_pool and ranked:
+            chosen = [item_pool[0], ranked[0]]
+        elif item_pool:
             chosen.append(item_pool[0])
-            if exits:
-                chosen.append(exits[0])
-            elif len(item_pool) > 1:
-                chosen.append(item_pool[1])
         else:
-            chosen = exits[:2]
+            chosen = ranked[:2]
 
-        # Discovery mechanic: if a latent node pool exists and we only have
-        # 1 choice so far, offer an "undiscovered path" exit. In infinite mode
-        # we also occasionally open a new path even when 2 exits exist, so the
-        # world keeps growing as players explore.
-        want_discovery = (
-            len(chosen) < 2
-            or (self._infinite_mode and random.random() < 0.30)
-        )
-        if want_discovery:
-            discovered_exit = self._discover_latent_node(state.current_node)
-            if discovered_exit:
-                # If we already have 2 exits, replace the second with the new path
+        # Pad with exits — never offer two item-only slots when navigation exists
+        if ranked:
+            for ex in ranked:
                 if len(chosen) >= 2:
-                    chosen[1] = discovered_exit
-                else:
-                    chosen.append(discovered_exit)
+                    break
+                if ex not in chosen:
+                    chosen.append(ex)
+            if not any(getattr(c, "choice_type", None) == "exit" for c in chosen):
+                chosen = ranked[:2]
+            elif len(chosen) == 2 and getattr(chosen[1], "choice_type", None) == "item":
+                for ex in ranked:
+                    if ex not in chosen:
+                        chosen[1] = ex
+                        break
 
-        state.current_links = chosen[:2]
+        # If stuck with one choice, spawn a new exit immediately
+        if len(chosen) < 2:
+            self._maybe_spawn_from_play(from_node_id=state.current_node, force=True)
+            node = self.world.nodes[state.current_node]
+            exits = [e for e in node.exits if e.to_node != state.current_node]
+            if not exits:
+                exits = list(node.exits)
+            ranked = self._rank_exits_for_player(player_id, state.current_node, exits)
+            for ex in ranked:
+                if len(chosen) >= 2:
+                    break
+                if ex not in chosen:
+                    chosen.append(ex)
+
+        chosen = self._finalize_item_travel(chosen, ranked, state.current_node)
+        state.current_links = [
+            self._choice_for_display(c) for c in chosen[:2]
+        ]
+
+    def _finalize_item_travel(self, chosen: list, exits: list, node_id: str) -> list:
+        """Ensure every ItemChoice has a valid travel_exit paired with an exit choice."""
+        chosen = list(chosen[:2])
+
+        has_item = any(getattr(c, "choice_type", None) == "item" for c in chosen)
+        exit_in_chosen = [
+            c for c in chosen if getattr(c, "choice_type", None) == "exit"
+        ]
+
+        if has_item and not exit_in_chosen:
+            for ex in exits:
+                if ex not in chosen:
+                    if len(chosen) < 2:
+                        chosen.append(ex)
+                    else:
+                        chosen[1] = ex
+                    break
+
+        if has_item and not any(getattr(c, "choice_type", None) == "exit" for c in chosen):
+            fallback = self._synthesize_fallback_exit(node_id)
+            if fallback:
+                if len(chosen) < 2:
+                    chosen.append(fallback)
+                else:
+                    chosen[1] = fallback
+
+        for i, c in enumerate(chosen):
+            if getattr(c, "choice_type", None) != "item":
+                continue
+            companion = None
+            for j, other in enumerate(chosen):
+                if j != i and getattr(other, "choice_type", None) == "exit":
+                    companion = other
+                    break
+            if companion is None:
+                for ex in exits:
+                    if ex not in chosen or ex is c:
+                        companion = ex
+                        break
+            c.travel_exit = companion
+
+        return chosen[:2]
+
+    def _synthesize_fallback_exit(self, node_id: str) -> "ExitLink | None":
+        """Last-resort exit when a node has no usable exits (item travel fail-safe)."""
+        if not self.world:
+            return None
+        node = self.world.nodes.get(node_id)
+        if node:
+            candidates = [e for e in node.exits if e.to_node in self.world.nodes]
+            if candidates:
+                return random.choice(candidates)
+        others = [nid for nid in self.world.nodes if nid != node_id]
+        if not others:
+            return None
+        dest = random.choice(others)
+        return ExitLink(from_node=node_id, to_node=dest, label=f"Go to {dest.replace('_', ' ')}")
+
+    def _node_to_review_dict(self, node: "WorldNode") -> dict:
+        """Export a live world node as JSON for sanity/LLM review."""
+        return {
+            "id": node.id,
+            "title": node.title,
+            "text": node.current_text,
+            "description": node.current_text,
+            "tags": list(node.tags),
+            "exits": [
+                {"to": ex.to_node, "label": ex.label}
+                for ex in node.exits
+            ],
+            "items": [
+                meta["label"].replace("the ", "").replace("The ", "").strip()
+                for meta in node.items.values()
+                if meta.get("present")
+            ],
+        }
+
+    def _apply_reviewed_node_dict(self, nd: dict):
+        """Apply LLM/sanity edits back onto a live world node."""
+        node = self.world.nodes.get(nd.get("id", ""))
+        if not node:
+            return
+        text = (nd.get("text") or nd.get("description") or "").strip()
+        if text and text != node.current_text.strip():
+            node.current_text = text
+            node._sync_text_alias()
+        exit_by_dest = {e.to_node: e for e in node.exits}
+        for ex in nd.get("exits", []):
+            dest = ex.get("to")
+            if dest in exit_by_dest and ex.get("label"):
+                exit_by_dest[dest].label = ex["label"]
+
+    def _next_latent_node(self) -> dict | None:
+        """Next node to add: latent pool first, then Markov-generated."""
+        from world_sanity import sanitize_node_dict
+        if self._latent_nodes:
+            return sanitize_node_dict(self._latent_nodes.pop(0))
+        latent = self._generate_fresh_latent()
+        return sanitize_node_dict(latent) if latent else None
+
+    def _on_play_node_changed(self, node_id: str, reason: str):
+        """Track drift/item rewrites; spawn when threshold reached."""
+        if not self.world or node_id not in self.world.nodes:
+            return
+        reasons = self._play_changed_nodes.setdefault(node_id, [])
+        if reason not in reasons:
+            reasons.append(reason)
+        self._node_changes_since_spawn += 1
+        self._mark_node_for_llm_polish(node_id, reason)
+        self._maybe_spawn_from_play()
+
+    def _maybe_spawn_from_play(
+        self, from_node_id: str | None = None, force: bool = False,
+    ) -> int:
+        """After enough node changes, add a Markov location immediately (LLM later)."""
+        if not self.world:
+            return 0
+        threshold = self._effective_spawn_every()
+        if not force and self._node_changes_since_spawn < threshold:
+            if self.gallery_pace:
+                return self._maybe_gallery_idle_spawn()
+            return 0
+        return self._spawn_from_play(from_node_id=from_node_id)
+
+    def _cancel_llm_coalesce_timer(self):
+        with self._llm_lock:
+            if self._llm_timer:
+                self._llm_timer.cancel()
+                self._llm_timer = None
+
+    def _mark_node_for_llm_polish(self, node_id: str, reason: str):
+        """Debounce: queue node text for a background LLM fix (does not block play)."""
+        if not self._get_llm_client().enabled or not self.world:
+            return
+        if node_id not in self.world.nodes:
+            return
+        snap = deepcopy(self._node_to_review_dict(self.world.nodes[node_id]))
+        with self._llm_lock:
+            entry = self._llm_pending.setdefault(node_id, {"reasons": []})
+            entry["dict"] = snap
+            if reason not in entry["reasons"]:
+                entry["reasons"].append(reason)
+            if self._llm_timer:
+                self._llm_timer.cancel()
+            self._llm_timer = threading.Timer(
+                LLM_COALESCE_SEC, self._flush_llm_coalesce,
+            )
+            self._llm_timer.daemon = True
+            self._llm_timer.start()
+
+    def _flush_llm_coalesce(self):
+        """Fire a background polish for all nodes touched since last flush."""
+        with self._llm_lock:
+            pending = dict(self._llm_pending)
+            self._llm_pending.clear()
+            self._llm_timer = None
+        if not pending:
+            return
+        node_dicts = [e["dict"] for e in pending.values()]
+        change_reasons = {nid: e["reasons"] for nid, e in pending.items()}
+        neighbor_titles = {
+            nid: self._neighbor_titles_for_node(nid) for nid in pending.keys()
+        }
+        self._submit_llm_job(
+            node_dicts,
+            {
+                "play_session": True,
+                "fix_markov_only": True,
+                "change_reasons": change_reasons,
+                "recent_item_events": list(self._recent_item_events[-15:]),
+                "neighbor_titles": neighbor_titles,
+            },
+            label=f"polish {len(node_dicts)} node(s)",
+        )
+
+    def _submit_llm_job(
+        self, node_dicts: list[dict], context: dict, label: str,
+        refresh_from: str | None = None, new_node_ids: list[str] | None = None,
+    ):
+        """Enqueue an LLM review; results applied on the main thread when ready."""
+        client = self._get_llm_client()
+        if not client.enabled:
+            return
+        provider = "OpenAI" if client.mode == "openai" else client.mode.title()
+        self.world_log.add("llm", f"{provider} queued — {label} (background)")
+        self._report_progress(f"{provider} queued — {label}")
+        self._llm_job_queue.put({
+            "node_dicts": deepcopy(node_dicts),
+            "context": deepcopy(context),
+            "label": label,
+            "refresh_from": refresh_from,
+            "new_node_ids": new_node_ids or [],
+            "llm_mode": self.llm_mode,
+            "llm_model": self.llm_model,
+            "llm_ollama_url": self.llm_ollama_url,
+            "provider": provider,
+        })
+
+    def _llm_worker_loop(self):
+        while True:
+            job = self._llm_job_queue.get()
+            if job is None:
+                return
+            self._run_llm_job(job)
+
+    def _run_llm_job(self, job: dict):
+        from llm_client import LLMClient
+        client = LLMClient(
+            mode=job["llm_mode"],
+            model=job["llm_model"],
+            ollama_url=job["llm_ollama_url"],
+        )
+        t0 = time.perf_counter()
+        try:
+            reviewed, changes = client.review_nodes(job["node_dicts"], job["context"])
+            elapsed = time.perf_counter() - t0
+            self._schedule_main(lambda: self._apply_llm_job_result(
+                reviewed, changes, job, elapsed, error=None,
+            ))
+        except Exception as exc:
+            elapsed = time.perf_counter() - t0
+            self._schedule_main(lambda: self._apply_llm_job_result(
+                job["node_dicts"], [], job, elapsed, error=str(exc),
+            ))
+
+    def _apply_llm_job_result(
+        self,
+        node_dicts: list[dict],
+        llm_changes: list[str],
+        job: dict,
+        elapsed: float,
+        error: str | None,
+    ):
+        provider = job.get("provider", "LLM")
+        label = job.get("label", "review")
+        if error:
+            self.world_log.add("llm", f"{provider} failed ({elapsed:.1f}s): {error}")
+            self._report_progress(f"{provider} failed")
+            return
+
+        self.world_log.add("llm", f"{provider} done in {elapsed:.1f}s — {label}")
+        self._report_progress(f"{provider} done ({elapsed:.1f}s)")
+
+        if not self.world:
+            return
+
+        graph_dirty = False
+        players_on_changed: set[str] = set()
+        for nd in node_dicts:
+            nid = nd.get("id")
+            if not nid or nid not in self.world.nodes:
+                continue
+            before = self.world.nodes[nid].current_text
+            self._apply_reviewed_node_dict(nd)
+            if self.world.nodes[nid].current_text.strip() != before.strip():
+                graph_dirty = True
+                for pid, pstate in self.players.items():
+                    if pstate.current_node == nid:
+                        players_on_changed.add(pid)
+
+        if llm_changes:
+            self.world_log.add_block(
+                "llm", f"{label} — {len(llm_changes)} edit(s)", llm_changes,
+            )
+        elif node_dicts:
+            from world_log import diff_node_dicts
+            before_snap = job.get("node_dicts", [])
+            diff = diff_node_dicts(before_snap, node_dicts)
+            if diff:
+                self.world_log.add_block(
+                    "llm", f"{label} — {len(diff)} edit(s)", diff,
+                )
+
+        refresh_from = job.get("refresh_from")
+        if refresh_from:
+            for pid, pstate in list(self.players.items()):
+                if pstate.current_node == refresh_from:
+                    self._build_world_choices(pid)
+                    players_on_changed.add(pid)
+
+        for pid in players_on_changed:
+            self._emit_graph_change(moved_player=pid)
+        if graph_dirty and not players_on_changed:
+            self._emit_graph_change(canvas_only=True)
+
+    def _pick_spawn_from_node(self) -> str:
+        """Bias new locations toward nodes players occupy or recently changed."""
+        if not self.world:
+            return ""
+        occupied = {nid for nid, pids in self._world_at_node.items() if pids}
+        if self._play_changed_nodes:
+            changed = [nid for nid in self._play_changed_nodes if nid in occupied]
+            if changed:
+                return random.choice(changed)
+            return next(reversed(self._play_changed_nodes))
+        if occupied:
+            return random.choice(list(occupied))
+        if self.players:
+            return next(iter(self.players.values())).current_node
+        return random.choice(list(self.world.nodes.keys()))
+
+    def _spawn_from_play(self, from_node_id: str | None = None) -> int:
+        """Add a Markov location immediately; LLM polishes text in the background."""
+        if not self.world:
+            return 0
+
+        if len(self.world.nodes) >= self.max_world_nodes:
+            self.world_log.add(
+                "spawn",
+                f"skipped — node cap ({self.max_world_nodes})",
+            )
+            return 0
+
+        if from_node_id is None or from_node_id not in self.world.nodes:
+            from_node_id = self._pick_spawn_from_node()
+
+        if from_node_id not in self.world.nodes:
+            from_node_id = random.choice(list(self.world.nodes.keys()))
+
+        new_latent = self._next_latent_node()
+        if new_latent is None:
+            self.world_log.add("spawn", "skipped — no corpus for new nodes")
+            return 0
+
+        changed_ids = list(self._play_changed_nodes.keys()) or [from_node_id]
+        change_reasons = {
+            nid: list(self._play_changed_nodes.get(nid, []))
+            for nid in changed_ids
+        }
+        changes_at_spawn = self._node_changes_since_spawn
+
+        from world_sanity import sanitize_node_list
+        nodes_by_id = {n.id: n for n in self.world.nodes.values()}
+        new_latent = sanitize_node_list(
+            [new_latent],
+            nodes_by_id={
+                nid: {"id": nid, "title": n.title}
+                for nid, n in self.world.nodes.items()
+            },
+        )[0]
+
+        promoted_id = new_latent["id"]
+        added = self._promote_latent_node(new_latent, from_node_id)
+        if not added:
+            return 0
+
+        self._last_spawn_time = time.time()
+
+        self.world_log.add(
+            "spawn",
+            f"new location «{new_latent.get('title', promoted_id)}» "
+            f"← exit from {from_node_id} (after {changes_at_spawn} text changes, Markov text)",
+        )
+
+        self._play_changed_nodes.clear()
+        self._node_changes_since_spawn = 0
+
+        for pid, pstate in list(self.players.items()):
+            if pstate.current_node == from_node_id:
+                self._build_world_choices(pid)
+
+        self._emit_graph_change()
+
+        # Background LLM: polish changed nodes + the new location (players need not wait)
+        with self._llm_lock:
+            self._llm_pending.clear()
+            if self._llm_timer:
+                self._llm_timer.cancel()
+                self._llm_timer = None
+
+        llm_nodes: list[dict] = []
+        llm_reasons: dict[str, list[str]] = {}
+        for nid in changed_ids:
+            if nid not in self.world.nodes:
+                continue
+            llm_nodes.append(deepcopy(self._node_to_review_dict(self.world.nodes[nid])))
+            llm_reasons[nid] = change_reasons.get(nid, [])
+        if promoted_id in self.world.nodes:
+            llm_nodes.append(deepcopy(self._node_to_review_dict(self.world.nodes[promoted_id])))
+            llm_reasons[promoted_id] = ["new location"]
+
+        neighbor_titles = {
+            nd.get("id", ""): self._neighbor_titles_for_node(nd.get("id", ""))
+            for nd in llm_nodes if nd.get("id")
+        }
+
+        if llm_nodes:
+            self._submit_llm_job(
+                llm_nodes,
+                {
+                    "play_session": True,
+                    "fix_markov_only": True,
+                    "change_reasons": llm_reasons,
+                    "recent_item_events": list(self._recent_item_events[-15:]),
+                    "spawn_from": from_node_id,
+                    "new_node_id": promoted_id,
+                    "neighbor_titles": neighbor_titles,
+                },
+                label=f"spawn polish ({len(llm_nodes)} node(s))",
+                refresh_from=from_node_id,
+                new_node_ids=[promoted_id],
+            )
+
+        try:
+            from world_archive import save_session
+            save_session(self)
+        except Exception:
+            pass
+
+        return added
+
+    def _promote_latent_node(self, latent_data: dict, from_node_id: str) -> int:
+        """Add one reviewed latent node to the world and wire an exit from from_node_id."""
+        if not self.world or from_node_id not in self.world.nodes:
+            return 0
+
+        node_id = latent_data["id"]
+        if node_id in self.world.nodes:
+            node_id = f"{node_id}_d{self._fresh_node_counter}"
+            latent_data = dict(latent_data)
+            latent_data["id"] = node_id
+            self._fresh_node_counter += 1
+
+        label_dest = latent_data.get("title", node_id).replace("_", " ")
+        label = f"Go to {label_dest}"
+
+        back_label = "Return"
+        exits_back = [ExitLink(from_node=node_id, to_node=from_node_id, label=back_label)]
+        existing = [
+            nid for nid in self.world.nodes
+            if nid != from_node_id and nid != node_id
+        ]
+        if existing:
+            second_dest = random.choice(existing)
+            exits_back.append(ExitLink(
+                from_node=node_id,
+                to_node=second_dest,
+                label=f"Go to {second_dest.replace('_', ' ')}",
+            ))
+
+        desc = latent_data.get("text", latent_data.get("description", ""))
+        new_node = WorldNode(
+            node_id=node_id,
+            title=latent_data.get("title", node_id),
+            description=desc,
+            exits=exits_back,
+            tags=latent_data.get("tags", []),
+        )
+        from world_sanity import filter_carryable_items
+        for item_name in filter_carryable_items(latent_data.get("items", [])):
+            lbl = (item_name if item_name.lower().startswith(("the ", "a ", "an "))
+                   else f"the {item_name}")
+            new_node.items[item_name] = {"label": lbl, "present": True}
+        new_node._items_base = {k: dict(v) for k, v in new_node.items.items()}
+        self.world.nodes[node_id] = new_node
+        new_node.pregenerated_choices = self.generate_interaction_choices(node_id)
+
+        from_node = self.world.nodes[from_node_id]
+        from_node.exits.append(
+            ExitLink(from_node=from_node_id, to_node=node_id, label=label)
+        )
+        return 1
+
+    def _get_llm_client(self):
+        from llm_client import LLMClient
+        return LLMClient(
+            mode=self.llm_mode,
+            model=self.llm_model,
+            ollama_url=self.llm_ollama_url,
+        )
+
+    def _report_progress(self, msg: str):
+        if self.on_world_progress:
+            self.on_world_progress(msg)
+
+    def spawn_now(self) -> int:
+        """Manual spawn from control panel (ignores change counter)."""
+        if not self.world:
+            self.world_log.add("discovery", "spawn requested — no world loaded")
+            return 0
+        return self._spawn_from_play()
 
     def _generate_fresh_latent(self) -> dict | None:
-        """Synthesize a brand-new latent node dict from the corpus (infinite mode)."""
+        """Synthesize a brand-new node dict from the corpus."""
         if not self._corpus_locations:
             return None
         from world_generator import generate_node_text, _slugify
@@ -817,7 +1777,10 @@ class StoryEngine:
         body = generate_node_text(self.markov, loc_name, n_sentences=3)
         items = []
         if self._corpus_items and random.random() < 0.5:
-            items = [random.choice(self._corpus_items)[0]]
+            from world_sanity import is_carryable
+            pool = [(i, l) for i, l in self._corpus_items if is_carryable(i)]
+            if pool:
+                items = [random.choice(pool)[0]]
         return {
             "id":          node_id,
             "title":       loc_name.title(),
@@ -827,75 +1790,6 @@ class StoryEngine:
             "exits":       [],
             "items":       items,
         }
-
-    def _discover_latent_node(self, from_node_id: str) -> "ExitLink | None":
-        """
-        Pop a latent node from the pool, add it to the world graph,
-        wire it back to the current node, and return an ExitLink to it.
-        In infinite mode, generates a fresh node when the pool is empty.
-        """
-        if not self._latent_nodes:
-            if self._infinite_mode:
-                fresh = self._generate_fresh_latent()
-                if fresh is None:
-                    return None
-                self._latent_nodes.append(fresh)
-            else:
-                return None
-        latent_data = self._latent_nodes.pop(0)
-        node_id = latent_data["id"]
-
-        # Avoid ID collision
-        if node_id in self.world.nodes:
-            node_id = node_id + "_x"
-            latent_data["id"] = node_id
-
-        # Build exit label
-        label = self.markov.generate_short(length=5)
-        label = label.rstrip(".!?,;:")
-        if not label:
-            label = "Follow the passage ahead"
-
-        # Give the new node 2 exits: back to origin + one random existing node
-        back_label = self.markov.generate_short(length=5).rstrip(".!?,;:") or "Return"
-        exits_back = [ExitLink(
-            from_node=node_id,
-            to_node=from_node_id,
-            label=back_label,
-        )]
-        # Add a second exit to a random existing main node (not origin, not self)
-        existing = [
-            nid for nid in self.world.nodes
-            if nid != from_node_id and nid != node_id
-        ]
-        if existing:
-            second_dest = random.choice(existing)
-            exits_back.append(ExitLink(
-                from_node=node_id,
-                to_node=second_dest,
-                label=self.markov.generate_short(length=5).rstrip(".!?,;:") or "Continue",
-            ))
-        new_node = WorldNode(
-            node_id     = node_id,
-            title       = latent_data.get("title", node_id),
-            description = latent_data.get("text", latent_data.get("description", "")),
-            exits       = exits_back,
-            tags        = latent_data.get("tags", []),
-        )
-        # Register any items the latent node carries
-        for item_name in latent_data.get("items", []):
-            lbl = (item_name if item_name.lower().startswith(("the ", "a ", "an "))
-                   else f"the {item_name}")
-            new_node.items[item_name] = {"label": lbl, "present": True}
-        new_node._items_base = {k: dict(v) for k, v in new_node.items.items()}
-        self.world.nodes[node_id] = new_node
-        # Also pre-generate choices for the new node
-        new_node.pregenerated_choices = self.generate_interaction_choices(node_id)
-
-        if self.on_graph_change:
-            self.on_graph_change()
-
-        return ExitLink(from_node=from_node_id, to_node=node_id, label=label)
 
     def generate_interaction_choices(self, node_id: str) -> list:
         """Generate 2 interaction choices seeded from node text and tags."""
@@ -929,19 +1823,23 @@ class StoryEngine:
         )
         if reaction:
             reaction = reaction[0].upper() + reaction[1:]
-            node.accumulated_changes.append(reaction)
+            node.traces.append(reaction)
+            if len(node.traces) > 5:
+                node.traces.pop(0)
+            self.world_log.add(
+                "interact",
+                f"{player_id} @ {state.current_node}: «{choice.label}» → {reaction[:120]}",
+            )
         node.interaction_count += 1
-        node._update_text()
         node_id = state.current_node
         if node_id not in state.taken_interactions:
             state.taken_interactions[node_id] = set()
         state.taken_interactions[node_id].add(choice.label)
         self._build_world_choices(player_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._emit_graph_change(moved_player=player_id)
         return state
 
-    def take_item(self, player_id: str, item_id: str) -> "PlayerState":
+    def take_item(self, player_id: str, item_id: str, *, rebuild: bool = True) -> "PlayerState":
         """Player picks up an item from the current node."""
         state = self.players[player_id]
         node  = self.world.nodes[state.current_node]
@@ -951,12 +1849,13 @@ class StoryEngine:
         state.inventory       = item_id
         state.inventory_label = node.items[item_id]["label"]
         self._item_absent_rewrite(node, item_id, state.inventory_label)
-        self._build_world_choices(player_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._record_item_event(state.current_node, f"took {item_id}")
+        if rebuild:
+            self._build_world_choices(player_id)
+            self._emit_graph_change(moved_player=player_id)
         return state
 
-    def leave_item(self, player_id: str) -> "PlayerState":
+    def leave_item(self, player_id: str, *, rebuild: bool = True) -> "PlayerState":
         """Player leaves their carried item at the current node."""
         state     = self.players[player_id]
         item_id   = state.inventory
@@ -972,9 +1871,143 @@ class StoryEngine:
         state.inventory       = None
         state.inventory_label = None
         self._item_present_rewrite(node, item_id, item_label)
+        self._record_item_event(state.current_node, f"left {item_id}")
+        if rebuild:
+            self._build_world_choices(player_id)
+            self._emit_graph_change(moved_player=player_id)
+        return state
+
+    def _use_item(self, player_id: str, item_id: str, *, rebuild: bool = True) -> "PlayerState":
+        """Use a carried item at this node — clears inventory and rewrites node text."""
+        state = self.players[player_id]
+        if state.inventory != item_id:
+            return state
+        node = self.world.nodes[state.current_node]
+        item_label = state.inventory_label or f"the {item_id}"
+        state.inventory = None
+        state.inventory_label = None
+        seed_words = item_id.split() + node.tags + ["used", "here"]
+        reaction = self._markov_seeded_generate(
+            seed_words, length=max(10, self.text_len // 2)
+        )
+        if reaction:
+            reaction = reaction[0].upper() + reaction[1:]
+            node.traces.append(reaction)
+            if len(node.traces) > 5:
+                node.traces.pop(0)
+            node._sync_text_alias()
+        if rebuild:
+            self._build_world_choices(player_id)
+            self._emit_graph_change(moved_player=player_id)
+        return state
+
+    def _record_item_event(self, node_id: str, action: str):
+        msg = f"{node_id}: {action}"
+        self._recent_item_events.append(msg)
+        if len(self._recent_item_events) > 20:
+            self._recent_item_events.pop(0)
+        self.world_log.add("item", msg)
+
+    def _log_node_text_change(self, node_id: str, reason: str, before: str, after: str):
+        if before.strip() == after.strip():
+            return
+        self.world_log.add_block(
+            f"node/{node_id}",
+            f"{reason} — text updated",
+            [f"− {before.strip()[:400]}", f"+ {after.strip()[:400]}"],
+        )
+        self._on_play_node_changed(node_id, reason)
+
+    def _companion_exit(self, choices: list, chosen) -> "ExitLink | None":
+        """The navigation choice shown alongside an item button."""
+        travel = getattr(chosen, "travel_exit", None)
+        if travel is not None and travel.to_node in self.world.nodes:
+            return travel
+        for c in choices:
+            if c is chosen:
+                continue
+            if getattr(c, "choice_type", None) == "exit" and c.to_node in self.world.nodes:
+                return c
+        return None
+
+    def _world_travel(self, player_id: str, target_id: str) -> "PlayerState":
+        """Move a world-mode player to target_id (drift, encounters, new choices)."""
+        state = self.players[player_id]
+        if target_id not in self.world.nodes:
+            return state
+        from_id = state.current_node
+        if from_id == target_id:
+            self._build_world_choices(player_id)
+            self._emit_graph_change(moved_player=player_id)
+            return state
+
+        self.world_log.add(
+            "travel", f"{player_id}: {from_id} → {target_id}",
+        )
+
+        from_node = self.world.nodes.get(from_id)
+        if from_node:
+            n_exits = len([
+                e for e in from_node.exits if e.to_node != from_id
+            ])
+            if n_exits >= 3:
+                state.exit_rotation[from_id] = state.exit_rotation.get(from_id, 0) + 1
+
+        self.on_player_leave(from_id, player_id)
+        self._world_at_node[from_id].discard(player_id)
+        target_node = self.world.nodes[target_id]
+        target_node.visitors.add(player_id)
+        others_here = self._world_at_node[target_id] - {player_id}
+        is_encounter = bool(others_here)
+        self._world_at_node[target_id].add(player_id)
+        state.current_node = target_id
+        state.history.append(target_id)
+        dest = self.world.nodes[target_id]
+        title = (dest.title or target_id).replace("_", " ")
+        state.choice_beat = f"Toward {title}."
+        if is_encounter:
+            self._apply_encounter(target_id, player_id, others_here)
+        else:
+            state.status = STATUS_ACTIVE
+            self._build_world_choices(player_id)
+            self._emit_graph_change(moved_player=player_id)
+        return state
+
+    def _resolve_item_choice(self, player_id: str, chosen: "ItemChoice",
+                             choices: list) -> "PlayerState":
+        """Apply take/leave/use, then travel so item picks always advance the story."""
+        if chosen.action == "take":
+            self.take_item(player_id, chosen.item_id, rebuild=False)
+        elif chosen.action == "use":
+            self._use_item(player_id, chosen.item_id, rebuild=False)
+        else:
+            self.leave_item(player_id, rebuild=False)
+
+        exit_c = self._companion_exit(choices, chosen)
+        if exit_c is not None and exit_c.to_node in self.world.nodes:
+            return self._world_travel(player_id, exit_c.to_node)
+
+        state = self.players[player_id]
+        node = self.world.nodes[state.current_node]
+        for c in choices:
+            if getattr(c, "choice_type", None) == "exit" and c.to_node in self.world.nodes:
+                return self._world_travel(player_id, c.to_node)
+
+        fallback = [
+            e for e in node.exits
+            if e.to_node in self.world.nodes and e.to_node != state.current_node
+        ]
+        if not fallback:
+            fallback = [e for e in node.exits if e.to_node in self.world.nodes]
+        if fallback:
+            return self._world_travel(player_id, random.choice(fallback).to_node)
+
+        synth = self._synthesize_fallback_exit(state.current_node)
+        if synth and synth.to_node in self.world.nodes:
+            return self._world_travel(player_id, synth.to_node)
+
         self._build_world_choices(player_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._emit_graph_change(moved_player=player_id)
         return state
 
     def _world_make_choice(self, player_id: str, choice_index: int) -> "PlayerState":
@@ -988,39 +2021,14 @@ class StoryEngine:
         chosen = choices[choice_index]
         if hasattr(chosen, 'choice_type') and chosen.choice_type == "interact":
             return self.apply_interaction(player_id, chosen)
-        # Item interaction (take / leave / use)
+        # Item interaction (take / leave / use) — always travel afterward when possible
         if getattr(chosen, 'choice_type', None) == "item":
-            if chosen.action == "take":
-                return self.take_item(player_id, chosen.item_id)
-            else:
-                return self.leave_item(player_id)
+            return self._resolve_item_choice(player_id, chosen, choices)
         # Navigation (exit choice)
         target_id = chosen.to_node
-        from_id   = state.current_node
         if target_id not in self.world.nodes:
             return state
-        # Note: a node with an active encounter is NOT blocked — the arriving
-        # player joins the meeting (becomes a witness).  Silently rejecting the
-        # move here previously felt like input lag.
-        # Drift + trace on departure
-        self.on_player_leave(from_id, player_id)
-        self._world_at_node[from_id].discard(player_id)
-        target_node = self.world.nodes[target_id]
-        target_node.visitors.add(player_id)
-        others_here  = self._world_at_node[target_id] - {player_id}
-        is_encounter = bool(others_here)
-        self._world_at_node[target_id].add(player_id)
-        state.current_node = target_id
-        state.history.append(target_id)
-        if is_encounter:
-            self._apply_encounter(target_id, player_id, others_here)
-            # on_encounter_start already called _push_all; skip on_graph_change
-        else:
-            state.status = STATUS_ACTIVE
-            self._build_world_choices(player_id)
-            if self.on_graph_change:
-                self.on_graph_change()
-        return state
+        return self._world_travel(player_id, target_id)
 
     # ------------------------------------------------------------------
     # Drift, traces, co-presence
@@ -1034,7 +2042,8 @@ class StoryEngine:
         if node is None:
             return
         node.drift += 1
-        if int(node.drift) % self._drift_rate == 0:
+        drift_rate = self._effective_drift_rate()
+        if int(node.drift) % drift_rate == 0:
             self._drift_rewrite(node)
         self._generate_trace(node)
 
@@ -1082,8 +2091,10 @@ class StoryEngine:
             variation = variation.rstrip('.!?, ') + '.'
 
         sentences[idx] = variation
+        before = node.current_text
         node.current_text = '\n\n'.join(sentences)
         node._sync_text_alias()
+        self._log_node_text_change(node.id, f"drift (visit {int(node.drift)})", before, node.current_text)
         # Feed rewritten sentence back into chain
         self._feed_back(variation)
 
@@ -1138,8 +2149,10 @@ class StoryEngine:
             if variation[-1] not in ".!?":
                 variation = variation.rstrip(".!?, ") + "."
         sentences[target_idx] = variation
+        before = node.current_text
         node.current_text = "\n\n".join(sentences)
         node._sync_text_alias()
+        self._log_node_text_change(node.id, f"item taken ({item_label})", before, node.current_text)
         self._feed_back(variation)
 
     def _item_present_rewrite(self, node: "WorldNode", item_id: str, item_label: str):
@@ -1168,8 +2181,10 @@ class StoryEngine:
             sentences[-1] = variation
         else:
             sentences = [variation]
+        before = node.current_text
         node.current_text = "\n\n".join(sentences)
         node._sync_text_alias()
+        self._log_node_text_change(node.id, f"item left ({item_label})", before, node.current_text)
         self._feed_back(variation)
 
     def get_display_text(self, node_id: str) -> str:
@@ -1525,7 +2540,15 @@ class StoryEngine:
         return f"P{n:02d}"
 
     def spawn_player(self, player_id: str | None = None) -> PlayerState:
-        if player_id is None or player_id in self.players:
+        if player_id and player_id in self.players:
+            state = self.players[player_id]
+            if self._is_world_mode:
+                self._build_world_choices(player_id)
+            else:
+                state.current_links = self.graph.get_links_from(state.current_node)
+            self._emit_graph_change(moved_player=player_id)
+            return state
+        if player_id is None:
             player_id = self._next_player_id()
         if self._is_world_mode:
             return self._world_spawn_player(player_id)
@@ -1534,8 +2557,7 @@ class StoryEngine:
         self.players[player_id] = state
         self._at_node[node_id].add(player_id)
         state.current_links = self.graph.get_links_from(node_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._emit_graph_change(moved_player=player_id)
         return state
 
     def reset_player(self, player_id: str) -> PlayerState:
@@ -1549,8 +2571,7 @@ class StoryEngine:
         self.players[player_id] = state
         self._at_node[node_id].add(player_id)
         state.current_links = self.graph.get_links_from(node_id)
-        if self.on_graph_change:
-            self.on_graph_change()
+        self._emit_graph_change(moved_player=player_id)
         return state
 
     def remove_player(self, player_id: str):
@@ -1666,9 +2687,6 @@ class StoryEngine:
                 node.text, link.label
             )
 
-        if self.on_graph_change:
-            self.on_graph_change()
-
     # ------------------------------------------------------------------
     # Choice resolution
     # ------------------------------------------------------------------
@@ -1679,6 +2697,10 @@ class StoryEngine:
             return None
         if self._is_world_mode:
             return self._world_make_choice(player_id, link_index)
+        return self._make_choice_dynamic(player_id, link_index)
+
+    def _make_choice_dynamic(self, player_id: str, link_index: int) -> PlayerState | None:
+        """Dynamic graph choice resolution (non-world mode)."""
         state = self.players[player_id]
 
         if state.status == STATUS_GAME_OVER:
@@ -1731,8 +2753,7 @@ class StoryEngine:
             state.status = STATUS_ACTIVE
             self._ensure_expanded(target_node_id, player_id)
             state.current_links = self.graph.get_links_from(target_node_id)
-            if self.on_graph_change:
-                self.on_graph_change()
+            self._emit_graph_change(moved_player=player_id)
 
         return state
 
