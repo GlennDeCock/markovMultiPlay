@@ -52,6 +52,7 @@ class GameServer:
         self._running = False
         self._queue: queue.Queue = queue.Queue()
         self._poll_id = None
+        self._render_gen: dict[str, int] = {}
 
         # Hook into engine callbacks — these fire on the main thread
         # (from ControlWindow interactions), so it's safe to call
@@ -201,9 +202,8 @@ class GameServer:
         if not self._running:
             return
         try:
-            while True:
-                item = self._queue.get_nowait()
-                self._process_item(item)
+            item = self._queue.get_nowait()
+            self._process_item(item)
         except queue.Empty:
             pass
         except Exception as exc:
@@ -241,8 +241,12 @@ class GameServer:
                 if len(self.engine.players) >= MAX_PLAYERS:
                     log.warning("Max players reached, rejecting %s", client.addr)
                     return
-                state = self.engine.spawn_player()
-                pid = state.player_id
+                pid = None
+
+        if pid is None:
+            state = self.engine.spawn_player()
+            pid = state.player_id
+            with self._lock:
                 client.player_id = pid
                 self._clients[pid] = client
                 self._device_players[device_id] = pid
@@ -265,12 +269,26 @@ class GameServer:
     # ------------------------------------------------------------------
 
     def _send_render(self, client: _Client):
+        snap = self._snapshot_render(client)
+        if snap is None:
+            return
+        pid = snap["player_id"]
+        with self._lock:
+            gen = self._render_gen.get(pid, 0) + 1
+            self._render_gen[pid] = gen
+        threading.Thread(
+            target=self._render_and_send,
+            args=(client, snap, gen),
+            daemon=True,
+        ).start()
+
+    def _snapshot_render(self, client: _Client) -> dict | None:
         pid = client.player_id
         if pid is None:
-            return
+            return None
         state = self.engine.players.get(pid)
         if state is None:
-            return
+            return None
         node = self.engine.active_graph.nodes.get(state.current_node)
         node_title = None
         if node and self.engine.world:
@@ -291,32 +309,54 @@ class GameServer:
             scene_text = self.engine.get_display_text_for_player(pid)
             if not scene_text and node:
                 scene_text = getattr(node, "text", "")
-            choices = state.current_links or []
+            choices = list(state.current_links or [])
             trace = self.engine.get_player_trace_text(pid)
             use_restart = state.status == STATUS_GAME_OVER
 
+        return {
+            "player_id": pid,
+            "scene_text": scene_text,
+            "choices": choices,
+            "trace": trace,
+            "status": state.status,
+            "node_id": state.current_node,
+            "node_title": node_title,
+            "use_restart": use_restart,
+            "screen_w": client.screen_w,
+            "screen_h": client.screen_h,
+        }
+
+    def _render_and_send(self, client: _Client, snap: dict, gen: int):
+        pid = snap["player_id"]
         try:
             png = render_to_png_bytes(
                 player_id=pid,
-                scene_text=scene_text,
-                choices=choices,
-                trace=trace,
-                status=state.status,
-                node_id=state.current_node,
-                node_title=node_title,
-                screen_w=client.screen_w,
-                screen_h=client.screen_h,
+                scene_text=snap["scene_text"],
+                choices=snap["choices"],
+                trace=snap["trace"],
+                status=snap["status"],
+                node_id=snap["node_id"],
+                node_title=snap["node_title"],
+                use_restart=snap["use_restart"],
+                screen_w=snap["screen_w"],
+                screen_h=snap["screen_h"],
             )
         except Exception as exc:
             log.error("Render error for %s: %s", pid, exc)
             return
 
+        with self._lock:
+            if self._render_gen.get(pid) != gen:
+                return
+            if self._clients.get(pid) is not client:
+                return
+
         msg = json.dumps({
             "player_id": pid,
-            "status": state.status,
-            "encounter": state.status == STATUS_ENCOUNTER,
+            "status": snap["status"],
+            "encounter": snap["status"] == STATUS_ENCOUNTER,
             "image_b64": base64.b64encode(png).decode("ascii"),
-            "choice_count": len(choices),
+            "choice_count": len(snap["choices"]),
         })
 
         try:

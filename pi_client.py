@@ -46,11 +46,10 @@ EPD_H = epd_driver.EPD_HEIGHT  # 480
 RENDER_W = 480
 RENDER_H = 800
 
-# Should the received portrait image be rotated to match the physical
-# orientation of the e-paper?  If the display is physically mounted in
-# landscape and you want portrait, set ROTATE = 90 (counter-clockwise).
-# If mounted in portrait already, set ROTATE = 0.
-ROTATE = 90
+# Rotate the received portrait image to match the physical panel.
+# 90° CCW: portrait → landscape on a side-mounted panel.
+# Use 270° (90 + 180) when the panel is hung upside-down.
+ROTATE = 270
 
 # ---------------------------------------------------------------------------
 # Digispark evdev discovery
@@ -117,9 +116,9 @@ def send_json(sock: socket.socket, msg: dict):
     sock.sendall((json.dumps(msg) + "\n").encode("utf-8"))
 
 
-def recv_line(sock: socket.socket) -> str:
+def recv_line(sock: socket.socket, timeout: float = 45.0) -> str:
     buf = b""
-    sock.settimeout(10.0)
+    sock.settimeout(timeout)
     try:
         while True:
             c = sock.recv(1)

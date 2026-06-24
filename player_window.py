@@ -1,25 +1,25 @@
 """
 player_window.py — Individual player window, styled as an E-Ink screen.
-800×600, off-white paper, black ink, dotted borders.
+480×800 portrait — Background.png carries frame/button art; canvas overlays
+cityscape + text only (no widget backgrounds).
 """
 
 import tkinter as tk
 from tkinter import font as tkfont
-from engine import STATUS_ACTIVE, STATUS_ENCOUNTER, STATUS_GAME_OVER
-from image_gen import generate_scene_image, generate_choice_image
+from engine import STATUS_ENCOUNTER, STATUS_GAME_OVER
+from image_gen import generate_node_image
+from ui_assets import load_ui_photo
 
 # ---------------------------------------------------------------------------
-# E-Ink palette
+# Palette
 # ---------------------------------------------------------------------------
-PAPER     = "#dcdcd0"
-PAPER_HOV = "#c8c8bc"
+PAPER     = "#ffffff"
 INK       = "#0f0f0c"
 INK_DIM   = "#8a8a80"
-INK_RULE  = "#aaaaA0"
-WIN_BG    = "#0a0a08"
+WIN_BG    = "#ffffff"
 
 # ---------------------------------------------------------------------------
-# Layout  (all px, 480×800 portrait e-ink)
+# Layout  (480×800 portrait e-ink — 7.5" panel)
 # ---------------------------------------------------------------------------
 BEZEL  = 0
 SCR_W  = 480
@@ -27,27 +27,36 @@ SCR_H  = 800
 PW     = SCR_W
 PH     = SCR_H
 
-IMG_W   = 280                         # 280×280 grid rendered at ZOOM=1 → 280px (1px dots)
-IMG_H   = 280
-IMG_PAD = 8
-IMG_TOP = 18                          # dropped 10px from top
-IMG_X   = (PW - IMG_W) // 2          # 100
-SEP1_Y  = IMG_TOP + IMG_H + IMG_PAD  # 306
+SCENE_TOP     = 108
+SCENE_W       = 340
+SCENE_H       = 212
+SCENE_X       = (PW - SCENE_W) // 2
+SCENE_GRID_W  = SCENE_W
+SCENE_GRID_H  = SCENE_H
+SCENE_ZOOM    = 1
 
-TEXT_Y  = SEP1_Y + 9                 # ~20% more gap
-TRACE_H = 28
+NODE_FRAME_W  = int(PW * 0.68)
+NODE_FRAME_H  = int(NODE_FRAME_W * 666 / 1182)
+NODE_FRAME_X  = (PW - NODE_FRAME_W) // 2
+NODE_FRAME_Y  = SCENE_TOP + SCENE_H + 18
+NODE_FRAME_BORDER = 0.05
+
+TEXT_WRAP_W   = int(NODE_FRAME_W * (1 - 2 * NODE_FRAME_BORDER))
+TEXT_CY       = NODE_FRAME_Y + NODE_FRAME_H // 2
+TEXT_BODY_SIZE = 8
+NODE_ID_TEXT_SIZE = 6
+
+BTN_SIZE      = 88
+BTN_Y         = PH - 112
+CHOICE_GAP    = 62
+CHOICE_LX     = PW // 2 - CHOICE_GAP
+CHOICE_RX     = PW // 2 + CHOICE_GAP
+CHOICE_TEXT_Y = BTN_Y - BTN_SIZE // 2 - 14
+CHOICE_W      = 168
+
+TRACE_H       = 22
+TRACE_Y       = PH - TRACE_H - 6
 MAX_CHOICES   = 2
-CHOICE_D      = 200                   # grid_size=100 at zoom=2 → 200px diameter
-CHOICE_GRID   = 100
-CHOICE_ZOOM   = 2
-CHOICE_R      = CHOICE_D // 2
-CHOICE_LX     = PW // 4
-CHOICE_RX     = 3 * PW // 4
-CHOICE_Y_CTR  = PH - CHOICE_R - 20
-SEP2_Y        = CHOICE_Y_CTR - CHOICE_R - TRACE_H - 8
-TEXT_H        = SEP2_Y - TEXT_Y
-TRACE_Y       = SEP2_Y + 4
-_TEXT_PADY    = 10                    # small fixed padding; zone height handles centering
 
 
 class PlayerWindow:
@@ -56,7 +65,9 @@ class PlayerWindow:
         self.player_id = player_id
         self.engine    = engine
         self.on_event  = on_event_cb
-        self._photo    = None
+        self._scene_photo = None
+        self._last_scene_node: str | None = None
+        self._ui_photos: list = []
 
         self.win = tk.Toplevel(parent_root)
         self.win.title(player_id)
@@ -65,7 +76,6 @@ class PlayerWindow:
         self.win.configure(bg=WIN_BG)
         self.win.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Bind A/B keys to choice 0/1 for Digispark hardware support
         self.win.bind("<Key-a>", lambda e: self._on_choice(0))
         self.win.bind("<Key-A>", lambda e: self._on_choice(0))
         self.win.bind("<Key-b>", lambda e: self._on_choice(1))
@@ -74,92 +84,86 @@ class PlayerWindow:
         self._build_ui()
         self._refresh_from_state()
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+    def _keep_photo(self, photo) -> object:
+        self._ui_photos.append(photo)
+        return photo
 
     def _build_ui(self):
-        # Paper frame
-        paper = tk.Frame(self.win, bg=PAPER, width=PW, height=PH)
+        paper = tk.Frame(self.win, bg=WIN_BG, width=PW, height=PH)
         paper.place(x=BEZEL, y=BEZEL)
         paper.pack_propagate(False)
         self._paper = paper
 
-        # ── Outer border: none ──────────────────────────────────────────
-
-        # ── Scene image ───────────────────────────────────────────────
-        self._img_label = tk.Label(paper, bg=PAPER, bd=0,
-                                   highlightthickness=0)
-        self._img_label.place(x=IMG_X, y=IMG_TOP, width=IMG_W, height=IMG_H)
-
-        # ── Scene text ────────────────────────────────────────────────
-        mono = tkfont.Font(family="Courier", size=11)
-        self.text_box = tk.Text(
-            paper, wrap="word",
-            bg=PAPER, fg=INK, font=mono,
-            relief="flat", bd=0, state="disabled",
-            cursor="arrow", spacing1=4, spacing3=4,
-            highlightthickness=0, padx=24, pady=_TEXT_PADY,
+        self._canvas = tk.Canvas(
+            paper, width=PW, height=PH,
+            highlightthickness=0, bd=0, bg=WIN_BG,
         )
-        self.text_box.tag_configure("center", justify="center")
-        self.text_box.place(x=0, y=TEXT_Y, width=PW, height=TEXT_H)
+        self._canvas.place(x=0, y=0)
 
-        # ── Choice stars (noise-map dithered eight-spiked star) ────────
-        bfont = tkfont.Font(family="Courier", size=8)
-        self._choice_buttons: list = []
-        self._choice_photos:  list = []
-        self._choice_labels:  list = ["", ""]
-        self._last_scene_node: str | None = None
+        bg = self._keep_photo(load_ui_photo("Background.png", PW, PH))
+        self._canvas.create_image(0, 0, image=bg, anchor="nw")
+
+        self._scene_id = self._canvas.create_image(
+            SCENE_X, SCENE_TOP, anchor="nw",
+        )
+
+        self._body_font = tkfont.Font(family="Georgia", size=TEXT_BODY_SIZE)
+        self._node_font = tkfont.Font(family="Courier", size=NODE_ID_TEXT_SIZE)
+        self._choice_font = tkfont.Font(family="Georgia", size=9)
+        self._trace_font = tkfont.Font(family="Courier", size=7)
+
+        self._body_text_id = self._canvas.create_text(
+            NODE_FRAME_X + NODE_FRAME_W // 2, TEXT_CY,
+            text="", width=TEXT_WRAP_W,
+            font=self._body_font, fill=INK,
+            justify="center", anchor="center",
+        )
+        self._node_text_id = self._canvas.create_text(
+            NODE_FRAME_X + NODE_FRAME_W - int(NODE_FRAME_W * NODE_FRAME_BORDER),
+            NODE_FRAME_Y + int(NODE_FRAME_H * NODE_FRAME_BORDER),
+            text="", font=self._node_font, fill=INK_DIM, anchor="ne",
+        )
+
+        self._choice_text_ids: list[int] = []
+        self._choice_hit_ids: list[int] = []
         for i, cx_pos in enumerate([CHOICE_LX, CHOICE_RX]):
-            x0 = cx_pos - CHOICE_R
-            y0 = CHOICE_Y_CTR - CHOICE_R
-            cv = tk.Canvas(paper, width=CHOICE_D, height=CHOICE_D,
-                           bg=PAPER, highlightthickness=0, bd=0,
-                           cursor="hand2")
-            cv.place(x=x0, y=y0)
-            photo = generate_choice_image("", grid_size=CHOICE_GRID, zoom=CHOICE_ZOOM, ink=INK, paper=PAPER)
-            self._choice_photos.append(photo)
-            img_id = cv.create_image(0, 0, image=photo, anchor="nw")
-            txt_id = cv.create_text(
-                CHOICE_R, CHOICE_R, text="",
-                fill=INK, font=bfont,
-                width=CHOICE_D - 56, justify="center", anchor="center",
+            tid = self._canvas.create_text(
+                cx_pos, CHOICE_TEXT_Y,
+                text="", font=self._choice_font, fill=INK,
+                width=CHOICE_W, justify="center", anchor="s",
+            )
+            hid = self._canvas.create_rectangle(
+                cx_pos - BTN_SIZE // 2, BTN_Y - BTN_SIZE // 2,
+                cx_pos + BTN_SIZE // 2, BTN_Y + BTN_SIZE // 2,
+                fill="", outline="", width=0,
             )
             idx = i
-            cv.bind("<Button-1>", lambda e, i=idx: self._on_choice(i))
-            self._choice_buttons.append((cv, img_id, txt_id))
+            self._canvas.tag_bind(tid, "<Button-1>", lambda e, i=idx: self._on_choice(i))
+            self._canvas.tag_bind(hid, "<Button-1>", lambda e, i=idx: self._on_choice(i))
+            self._canvas.tag_bind(hid, "<Enter>", lambda e: self._canvas.configure(cursor="hand2"))
+            self._canvas.tag_bind(hid, "<Leave>", lambda e: self._canvas.configure(cursor=""))
+            self._choice_text_ids.append(tid)
+            self._choice_hit_ids.append(hid)
 
-        # ── Trace line (distinct dimmed line below sep2) ───────────────
-        self._lbl_trace = tk.Label(
-            paper, text="", bg=PAPER, fg=INK_DIM,
-            font=("Courier", 8), anchor="center",
-            wraplength=PW - 32, justify="center",
-        )
-        self._lbl_trace.place(x=16, y=TRACE_Y, width=PW - 32, height=TRACE_H)
-
-        # ── Co-presence overlay widget removed (replaced by encounter system) ──
-
-        # ── Restart button (hidden by default) ────────────────────────
-        self._btn_restart = tk.Button(
-            paper, text="[ restart ]",
-            bg=PAPER, fg=INK, activebackground=PAPER_HOV,
-            font=("Courier", 11), relief="flat", bd=0,
-            pady=14, cursor="hand2",
-            command=self._on_restart,
+        self._trace_id = self._canvas.create_text(
+            PW // 2, TRACE_Y + TRACE_H // 2,
+            text="", font=self._trace_font, fill=INK_DIM,
+            width=PW - 32, justify="center", anchor="center",
         )
 
-        # ── Node id (top-right of text zone, very dim) ─────────────────────────────
-        self._lbl_node = tk.Label(
-            paper, text="", bg=PAPER, fg=INK_DIM,
-            font=("Courier", 7), anchor="e",
+        self._restart_id = self._canvas.create_text(
+            PW // 2, BTN_Y,
+            text="[ restart ]", font=("Courier", 11), fill=INK,
+            anchor="center", state="hidden",
         )
-        self._lbl_node.place(x=PW - 100, y=SEP1_Y + 2, width=92)
+        self._canvas.tag_bind(self._restart_id, "<Button-1>", lambda e: self._on_restart())
+        self._canvas.tag_bind(self._restart_id, "<Enter>", lambda e: self._canvas.configure(cursor="hand2"))
+        self._canvas.tag_bind(self._restart_id, "<Leave>", lambda e: self._canvas.configure(cursor=""))
 
-        # ── Separator lines: none ────────────────────────────────────────
-
-    # ------------------------------------------------------------------
-    # State → UI
-    # ------------------------------------------------------------------
+    def _set_choice_visible(self, index: int, visible: bool):
+        state = "normal" if visible else "hidden"
+        self._canvas.itemconfigure(self._choice_text_ids[index], state=state)
+        self._canvas.itemconfigure(self._choice_hit_ids[index], state=state)
 
     def _refresh_from_state(self):
         state = self.engine.players.get(self.player_id)
@@ -181,7 +185,6 @@ class PlayerWindow:
                 display=[],
                 game_over=False,
                 scene_photo=None,
-                choice_photos=None,
             )
             return
 
@@ -190,23 +193,16 @@ class PlayerWindow:
         display: list[tuple[str, str]] = []
         if state.status != STATUS_GAME_OVER:
             for ch in (links or [])[:MAX_CHOICES]:
-                pfx = "↺  " if getattr(ch, "is_cross", False) else "→  "
+                pfx = "↺  " if getattr(ch, "is_cross", False) else ""
                 display.append((pfx, ch.label))
 
         scene_photo = None
-        if self._last_scene_node != state.current_node:
-            scene_photo = generate_scene_image(node_text, ink=INK, paper=PAPER)
-
-        choice_photos: list[tuple[int, object]] = []
-        for i, (pfx, label) in enumerate(display[:MAX_CHOICES]):
-            if label != self._choice_labels[i]:
-                choice_photos.append((
-                    i,
-                    generate_choice_image(
-                        label, grid_size=CHOICE_GRID, zoom=CHOICE_ZOOM,
-                        ink=INK, paper=PAPER,
-                    ),
-                ))
+        node_key = state.current_node or node_text or ""
+        if node_key and self._last_scene_node != state.current_node:
+            scene_photo = generate_node_image(
+                node_key, grid_w=SCENE_GRID_W, grid_h=SCENE_GRID_H,
+                zoom=SCENE_ZOOM, ink=INK, paper=PAPER,
+            )
 
         self._apply_screen(
             node_id=state.current_node,
@@ -215,63 +211,42 @@ class PlayerWindow:
             display=display,
             game_over=state.status == STATUS_GAME_OVER,
             scene_photo=scene_photo,
-            choice_photos=choice_photos,
         )
         if scene_photo is not None:
             self._last_scene_node = state.current_node
 
     def _apply_screen(self, *, node_id, body_text, trace, display,
-                      game_over, scene_photo, choice_photos):
-        """Apply a fully prepared screen in one shot (Pi-style atomic update)."""
-        self._lbl_node.configure(text=node_id)
-        self._set_text(body_text)
-        self._lbl_trace.configure(text=trace)
+                      game_over, scene_photo):
+        self._canvas.itemconfigure(self._node_text_id, text=node_id or "")
+        self._canvas.itemconfigure(self._body_text_id, text=body_text or "")
+        self._canvas.itemconfigure(self._trace_id, text=trace or "")
 
         if game_over:
-            for cv, *_ in self._choice_buttons:
-                cv.place_forget()
-            self._btn_restart.place(x=0, y=SEP2_Y + 2,
-                                    width=PW, height=PH - SEP2_Y - 10)
+            for i in range(MAX_CHOICES):
+                self._set_choice_visible(i, False)
+            self._canvas.itemconfigure(self._restart_id, state="normal")
         else:
-            self._btn_restart.place_forget()
-            cx_positions = [CHOICE_LX, CHOICE_RX]
-            for i, (cv, img_id, txt_id) in enumerate(self._choice_buttons):
+            self._canvas.itemconfigure(self._restart_id, state="hidden")
+            for i in range(MAX_CHOICES):
                 if i < len(display):
                     pfx, label = display[i]
-                    cv.place(x=cx_positions[i] - CHOICE_R, y=CHOICE_Y_CTR - CHOICE_R)
-                    cv.itemconfigure(txt_id, text=pfx + label)
+                    self._canvas.itemconfigure(self._choice_text_ids[i], text=pfx + label)
+                    self._set_choice_visible(i, True)
                 else:
-                    cv.place_forget()
+                    self._set_choice_visible(i, False)
 
         if scene_photo is not None:
-            self._photo = scene_photo
-            self._img_label.configure(image=scene_photo)
-
-        if choice_photos:
-            for i, photo in choice_photos:
-                self._choice_photos[i] = photo
-                self._choice_labels[i] = display[i][1]
-                cv, img_id, _ = self._choice_buttons[i]
-                cv.itemconfigure(img_id, image=photo)
+            self._scene_photo = scene_photo
+            self._canvas.itemconfigure(self._scene_id, image=scene_photo)
 
         self.win.update_idletasks()
-
-    def _set_text(self, text: str):
-        self.text_box.configure(state="normal")
-        self.text_box.delete("1.0", "end")
-        self.text_box.insert("end", text, "center")
-        self.text_box.configure(state="disabled")
-
-    # ------------------------------------------------------------------
-    # Interactions
-    # ------------------------------------------------------------------
 
     def _on_choice(self, index: int):
         state = self.engine.players.get(self.player_id)
         if state is None:
             return
         if state.status == STATUS_ENCOUNTER:
-            return  # locked during encounter
+            return
         self.engine.make_choice(self.player_id, index)
         self.on_event(refresh_only=True)
 
@@ -285,10 +260,6 @@ class PlayerWindow:
         self.win.destroy()
         self.on_event(refresh_only=False)
 
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
     def notify_graph_changed(self):
         if self.win.winfo_exists():
             self._refresh_from_state()
@@ -296,8 +267,3 @@ class PlayerWindow:
     def destroy(self):
         self.engine.remove_player(self.player_id)
         self.win.destroy()
-
-
-# ---------------------------------------------------------------------------
-# Drawing helpers
-# ---------------------------------------------------------------------------
