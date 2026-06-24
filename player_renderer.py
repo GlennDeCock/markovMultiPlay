@@ -1,5 +1,5 @@
 """
-player_renderer.py — Renders a full player window as a 1-bit PIL Image.
+player_renderer.py — Renders a full player window as a grayscale PIL Image.
 Background.png carries frame, buttons, and border art; this layer adds
 cityscape + dynamic text only.
 """
@@ -46,14 +46,10 @@ def _load_background(width: int, height: int) -> Image.Image:
     return img
 
 
-def _rgba_to_1bit(rgba: Image.Image) -> Image.Image:
+def _rgba_to_gray(rgba: Image.Image) -> Image.Image:
     flat = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
     flat = Image.alpha_composite(flat, rgba)
-    return flat.convert("L").point(lambda p: 0 if p < 200 else 255, mode="1")
-
-
-def _paste_1bit(base: Image.Image, overlay: Image.Image, x: int, y: int) -> None:
-    base.paste(overlay, (x, y))
+    return flat.convert("L")
 
 
 def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
@@ -105,7 +101,7 @@ def render_player_screen(
     screen_w: int = PW,
     screen_h: int = PH,
 ) -> Image.Image:
-    """Render a full player window as 1-bit PIL Image (1=paper, 0=ink)."""
+    """Render a full player window as grayscale PIL Image (L mode)."""
     sw, sh = screen_w, screen_h
     sx = int(SCENE_X * sw / PW)
     sy = int(SCENE_TOP * sh / PH)
@@ -123,11 +119,11 @@ def render_player_screen(
     choice_text_y = int(CHOICE_TEXT_Y * sh / PH)
     trace_y = int(TRACE_Y * sh / PH)
 
-    img = _rgba_to_1bit(_load_background(sw, sh))
+    img = _rgba_to_gray(_load_background(sw, sh))
 
     seal_seed = node_id or scene_text or ""
     scene = generate_node_pil_image(seal_seed, sw_scene, sh_scene)
-    _paste_1bit(img, scene, sx, sy)
+    img.paste(scene, (sx, sy))
 
     draw = ImageDraw.Draw(img)
     body_font = _get_font(max(7, int(TEXT_BODY_SIZE * sh / PH)))
@@ -191,5 +187,5 @@ def render_to_png_bytes(player_id, scene_text, choices, trace,
     )
     import io
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    img.save(buf, format="PNG", compress_level=6, optimize=True)
     return buf.getvalue()

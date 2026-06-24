@@ -269,7 +269,7 @@ class ImageGenPlayground:
         w, h = tile.size
         from PIL import Image
         rows = (len(SEAL_SAMPLES) + cols - 1) // cols
-        sheet = Image.new("1", (w * cols, h * rows), 1)
+        sheet = Image.new("L", (w * cols, h * rows), 255)
         for i, (variant, label) in enumerate(SEAL_SAMPLES):
             tile = generate_seal_pil_image(label, variant=variant, zoom=2)
             r, c = divmod(i, cols)
@@ -279,7 +279,7 @@ class ImageGenPlayground:
         photo = tk.PhotoImage(width=sheet.width, height=sheet.height)
         rows_data = []
         for y in range(sheet.height):
-            row_colors = ["#0f0f0c" if sheet.getpixel((x, y)) == 0 else "#dcdcd0"
+            row_colors = ["#0f0f0c" if sheet.getpixel((x, y)) < 128 else "#dcdcd0"
                           for x in range(sheet.width)]
             rows_data.append("{" + " ".join(row_colors) + "}")
         photo.put(" ".join(rows_data))

@@ -34,7 +34,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export gothic seal PNG samples")
     parser.add_argument("--out", default="seals_preview", help="output directory")
     parser.add_argument("--size", type=int, default=140, help="grid size before zoom")
-    parser.add_argument("--zoom", type=int, default=2, help="nearest-neighbor upscale")
+    parser.add_argument("--zoom", type=int, default=2, help="upscale factor")
     args = parser.parse_args()
 
     out_dir = ROOT / args.out
@@ -68,7 +68,7 @@ def main() -> None:
     cols = 3
     w, h = generate_seal_pil_image("grid", size=args.size, variant="node", zoom=args.zoom).size
     from PIL import Image
-    sheet = Image.new("1", (w * cols, h * ((len(SAMPLES) + cols - 1) // cols)), 1)
+    sheet = Image.new("L", (w * cols, h * ((len(SAMPLES) + cols - 1) // cols)), 255)
     for i, (variant, label) in enumerate(SAMPLES):
         tile = generate_seal_pil_image(label, size=args.size, variant=variant, zoom=args.zoom)
         row, col = divmod(i, cols)

@@ -128,7 +128,8 @@ def _lerp_hex(t: float, ink: str, paper: str) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def _hmap_to_pil_image(hmap) -> "Image":
+def _hmap_to_1bit_pil_image(hmap, zoom: int = 1) -> "Image":
+    """Heightmap → 1-bit PIL (diffusion dither, 1=paper 0=ink)."""
     from PIL import Image as PILImage
     grid = _dither_diffusion_hmap(hmap)
     rows, cols = _hmap_dims(hmap)
@@ -138,6 +139,26 @@ def _hmap_to_pil_image(hmap) -> "Image":
         for c in range(cols):
             if grid[r][c]:
                 px[c, r] = 0
+    if zoom != 1:
+        img = img.resize((cols * zoom, rows * zoom), PILImage.Resampling.NEAREST)
+    return img
+
+
+def _hmap_to_pil_image(hmap, zoom: int = 1) -> "Image":
+    from PIL import Image as PILImage
+    rows, cols = _hmap_dims(hmap)
+    img = PILImage.new("L", (cols, rows))
+    px = img.load()
+    for r in range(rows):
+        for c in range(cols):
+            v = hmap[r][c]
+            if v < 0.0:
+                v = 0.0
+            elif v > 1.0:
+                v = 1.0
+            px[c, r] = int(v * 255)
+    if zoom != 1:
+        img = img.resize((cols * zoom, rows * zoom), PILImage.Resampling.LANCZOS)
     return img
 
 
@@ -2346,7 +2367,7 @@ def generate_node_pil_image(
     grid_w: int = 340,
     grid_h: int = 212,
 ) -> "Image":
-    """Landscape cityscape as 1-bit PIL Image (1=paper, 0=ink)."""
+    """Landscape cityscape as 1-bit diffusion-dithered PIL Image."""
     from PIL import Image as PILImage
     key = (node_id, grid_w, grid_h)
     if key in _node_pil_cache:
@@ -2355,7 +2376,7 @@ def generate_node_pil_image(
     hmap = _new_hmap_rect(grid_h, grid_w, 1.0)
     _compose_faded_cityscape(hmap, seed)
     _apply_contrast_on(hmap, 1.08)
-    img = _hmap_to_pil_image(hmap)
+    img = _hmap_to_1bit_pil_image(hmap)
     _node_pil_cache[key] = img
     return img.copy()
 
@@ -2420,25 +2441,13 @@ def generate_choice_image(
 
 
 def generate_scene_pil_image(text: str, zoom: int = 3) -> "Image":
-    """Same procedural scene, returned as a 1-bit PIL Image.
-    Pixel values: 1 = paper (white), 0 = ink (black).
-    zoom: scale factor (3 → 300×300, 2 → 200×200, 1 → 100×100).
-    Used by player_renderer.py for Pi Zero e-paper output."""
-    from PIL import Image as _PILImage
+    """Same procedural scene as grayscale PIL Image (L mode)."""
     seed = hash(text) & 0xFFFF_FFFF
     hmap = _layered_noise(seed)
     _draw_shapes(hmap, text, seed)
     _apply_organic_mask(hmap, seed)
-    grid = _dither(hmap)
-    img = _PILImage.new("1", (COLS, ROWS), 1)
-    for r in range(ROWS):
-        for c in range(COLS):
-            if grid[r][c]:
-                img.putpixel((c, r), 0)
-    if zoom != 1:
-        w, h = img.size
-        img = img.resize((w * zoom, h * zoom), _PILImage.NEAREST)
-    return img
+    _apply_contrast(hmap, 1.45)
+    return _hmap_to_1bit_pil_image(hmap, zoom=zoom)
 
 
 def generate_seal_image(
@@ -2467,15 +2476,6 @@ def generate_seal_pil_image(
     variant: str = "node",
     zoom: int = 2,
 ) -> "Image":
-    """Gothic seal as 1-bit PIL Image (1=paper, 0=ink)."""
-    from PIL import Image as _PILImage
+    """Gothic seal as 1-bit diffusion-dithered PIL Image."""
     hmap = _build_seal_hmap(seed_text, size, variant)
-    grid = _dither_hmap(hmap)
-    img = _PILImage.new("1", (size, size), 1)
-    for r in range(size):
-        for c in range(size):
-            if grid[r][c]:
-                img.putpixel((c, r), 0)
-    if zoom != 1:
-        img = img.resize((size * zoom, size * zoom), _PILImage.NEAREST)
-    return img
+    return _hmap_to_1bit_pil_image(hmap, zoom=zoom)

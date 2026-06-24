@@ -26,7 +26,7 @@ POLL_INTERVAL_MS = 50  # how often main thread polls the queue
 
 
 class _Client:
-    __slots__ = ("conn", "addr", "player_id", "device_id", "screen_w", "screen_h")
+    __slots__ = ("conn", "addr", "player_id", "device_id", "screen_w", "screen_h", "send_lock")
     def __init__(self, conn: socket.socket, addr: tuple):
         self.conn = conn
         self.addr = addr
@@ -34,6 +34,7 @@ class _Client:
         self.device_id: str | None = None
         self.screen_w = 480
         self.screen_h = 800
+        self.send_lock = threading.Lock()
 
 
 class GameServer:
@@ -233,7 +234,7 @@ class GameServer:
             pid = self._device_players.get(device_id)
             if pid and pid in self.engine.players:
                 stale = self._clients.get(pid)
-                if stale is not client:
+                if stale is not None and stale is not client:
                     stale.player_id = None
                 client.player_id = pid
                 self._clients[pid] = client
@@ -252,7 +253,7 @@ class GameServer:
                 self._device_players[device_id] = pid
 
         log.info("Device %s -> player %s (%s)", device_id, pid, client.addr)
-        self._send_render(client)
+        self._send_render(client, sync=True)
 
     def _on_disconnect(self, client: _Client):
         pid = client.player_id
@@ -268,19 +269,24 @@ class GameServer:
     #           main thread via _push_all / _spawn_player / _send_render)
     # ------------------------------------------------------------------
 
-    def _send_render(self, client: _Client):
+    def _send_render(self, client: _Client, sync: bool = False):
         snap = self._snapshot_render(client)
         if snap is None:
+            log.warning("Render skipped — no snapshot for %s", client.player_id)
             return
         pid = snap["player_id"]
         with self._lock:
             gen = self._render_gen.get(pid, 0) + 1
             self._render_gen[pid] = gen
-        threading.Thread(
-            target=self._render_and_send,
-            args=(client, snap, gen),
-            daemon=True,
-        ).start()
+        log.info("Rendering %s (gen %d)%s", pid, gen, " sync" if sync else "")
+        if sync:
+            self._render_and_send(client, snap, gen)
+        else:
+            threading.Thread(
+                target=self._render_and_send,
+                args=(client, snap, gen),
+                daemon=True,
+            ).start()
 
     def _snapshot_render(self, client: _Client) -> dict | None:
         pid = client.player_id
@@ -342,13 +348,15 @@ class GameServer:
                 screen_h=snap["screen_h"],
             )
         except Exception as exc:
-            log.error("Render error for %s: %s", pid, exc)
+            log.error("Render error for %s: %s", pid, exc, exc_info=True)
             return
 
         with self._lock:
             if self._render_gen.get(pid) != gen:
+                log.info("Render %s gen %d dropped (superseded)", pid, gen)
                 return
             if self._clients.get(pid) is not client:
+                log.info("Render %s gen %d dropped (client replaced)", pid, gen)
                 return
 
         msg = json.dumps({
@@ -360,9 +368,14 @@ class GameServer:
         })
 
         try:
-            client.conn.sendall((msg + "\n").encode("utf-8"))
+            with client.send_lock:
+                client.conn.sendall((msg + "\n").encode("utf-8"))
+            log.info("Sent %s screen to %s (%d png bytes, %d wire bytes)",
+                     pid, client.addr, len(png), len(msg) + 1)
         except OSError as exc:
             log.warning("Send error to %s: %s", pid, exc)
+        except Exception as exc:
+            log.error("Send failed for %s: %s", pid, exc, exc_info=True)
 
     def _push_all(self):
         """Push updated state to all connected clients. Main-thread only."""
